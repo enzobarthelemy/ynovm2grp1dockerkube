@@ -1,6 +1,6 @@
 services:
   mariadb:
-    image: mariadb:10.6
+    image: mariadb:lts-ubi10
     volumes:
       - mariadb_data:/var/lib/mysql
     environment:
