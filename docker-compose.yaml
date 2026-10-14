@@ -1,6 +1,6 @@
 services:
   mariadb:
-    image: mariadb:lts-ubi10
+    image: mariadb:10.6
     volumes:
       - mariadb_data:/var/lib/mysql
     environment:
@@ -37,7 +37,7 @@ services:
       retries: 10
 
   wordpress:
-    image: ebynov/ynovm2dockerwp:1.0.0
+    image: ebynov/ynovm2dockerwp:1.1.0
     container_name: wordpress
     restart: unless-stopped
     depends_on:
