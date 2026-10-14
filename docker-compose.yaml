@@ -4,10 +4,10 @@ services:
     volumes:
       - mariadb_data:/var/lib/mysql
     environment:
-      - MARIADB_ROOT_PASSWORD= ${MARIADB_ROOT_PASSWORD}
-      - MARIADB_USER= ${MARIADB_USER}
-      - MARIADB_PASSWORD= ${MARIADB_PASSWORD}
-      - MARIADB_DATABASE= ${MARIADB_DATABASE}
+      - MARIADB_ROOT_PASSWORD=${MARIADB_ROOT_PASSWORD}
+      - MARIADB_USER=${MARIADB_USER}
+      - MARIADB_PASSWORD=${MARIADB_PASSWORD}
+      - MARIADB_DATABASE=${MARIADB_DATABASE}
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
@@ -23,9 +23,9 @@ services:
       - nextcloud_data:/var/www/html
     environment:
       - MYSQL_HOST=mariadb
-      - MYSQL_DATABASE= ${MARIADB_DATABASE}
-      - MYSQL_USER= ${MARIADB_USER}
-      - MYSQL_PASSWORD= ${MARIADB_PASSWORD}
+      - MYSQL_DATABASE=${MARIADB_DATABASE}
+      - MYSQL_USER=${MARIADB_USER}
+      - MYSQL_PASSWORD=${MARIADB_PASSWORD}
     restart: always
     depends_on:
       mariadb:
