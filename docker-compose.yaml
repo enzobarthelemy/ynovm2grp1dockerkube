@@ -21,16 +21,19 @@ services:
     container_name: nextcloud-db
     volumes:
       - nextcloud_db_data:/var/lib/mysql
+      - nc_secrets:/run/vault:ro
     environment:
-      - MARIADB_ROOT_PASSWORD=${MARIADB_ROOT_PASSWORD}
-      - MARIADB_USER=${MARIADB_USER}
-      - MARIADB_PASSWORD=${MARIADB_PASSWORD}
-      - MARIADB_DATABASE=${MARIADB_DATABASE}
+      MARIADB_ROOT_PASSWORD_FILE: /run/vault/db_root_password
+      MARIADB_USER_FILE: /run/vault/db_user
+      MARIADB_PASSWORD_FILE: /run/vault/db_password
+      MARIADB_DATABASE_FILE: /run/vault/db_name
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
       timeout: 5s
       retries: 5
+    depends_on:
+      vault-agent-nextcloud: { condition: service_healthy }
     restart: always
     networks:
       - net_db
@@ -42,10 +45,11 @@ services:
     environment:
       MARIADB_DATABASE: ${WORDPRESS_DB_NAME}
       MARIADB_USER: ${WORDPRESS_DB_USER}
-      MARIADB_PASSWORD: ${WORDPRESS_DB_PASSWORD}
-      MARIADB_ROOT_PASSWORD: ${WORDPRESS_DB_ROOT_PASSWORD}
+      MARIADB_PASSWORD_FILE: /run/vault/db_password
+      MARIADB_ROOT_PASSWORD_FILE: /run/vault/db_root_password
     volumes:
       - wordpress_db_data:/var/lib/mysql
+      - wp_secrets:/run/vault:ro
     networks:
       - net_db
     healthcheck:
@@ -53,6 +57,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    depends_on:
+      vault-agent-wordpress: { condition: service_healthy }
 
   wordpress:
     image: ebynov/ynovm2dockerwp:1.2.1
@@ -64,10 +70,11 @@ services:
     environment:
       WORDPRESS_DB_HOST: wordpress-db:3306
       WORDPRESS_DB_USER: ${WORDPRESS_DB_USER}
-      WORDPRESS_DB_PASSWORD: ${WORDPRESS_DB_PASSWORD}
+      WORDPRESS_DB_PASSWORD_FILE: /run/vault/db_password
       WORDPRESS_DB_NAME: ${WORDPRESS_DB_NAME}
     volumes:
       - wordpress_data:/var/www/html
+      - wp_secrets:/run/vault:ro
     networks:
       - net_db
       - net_ext
@@ -78,17 +85,17 @@ services:
       - traefik.http.routers.wordpress.entrypoints=web
       - traefik.http.services.wordpress.loadbalancer.server.port=8080
 
-
   nextcloud:
     image: nextcloud:32.0.15-apache
     container_name: nextcloud
     volumes:
       - nextcloud_data:/var/www/html
+      - nc_secrets:/run/vault:ro
     environment:
-      - MYSQL_HOST=mariadb
-      - MYSQL_DATABASE=${MARIADB_DATABASE}
-      - MYSQL_USER=${MARIADB_USER}
-      - MYSQL_PASSWORD=${MARIADB_PASSWORD}
+      MYSQL_HOST: mariadb
+      MYSQL_DATABASE_FILE: /run/vault/db_name
+      MYSQL_USER_FILE: /run/vault/db_user
+      MYSQL_PASSWORD_FILE: /run/vault/db_password
     restart: always
     depends_on:
       mariadb:
@@ -103,13 +110,82 @@ services:
       - traefik.http.routers.nextcloud.entrypoints=web
       - traefik.http.services.nextcloud.loadbalancer.server.port=80
 
+  vault:
+    image: hashicorp/vault:1.13.3
+    container_name: vault
+    command: server
+    cap_add: [IPC_LOCK]
+    ports: ["127.0.0.1:8200:8200"]
+    volumes:
+      - ./vault/config:/vault/config:ro
+      - vault_data:/vault/file
+    networks: [net_vault]
+    restart: unless-stopped
+
+  vault-init:
+    image: hashicorp/vault:1.13.3
+    container_name: vault-init
+    entrypoint: ["/bin/sh", "/init.sh"]
+    volumes:
+      - ./vault/init.sh:/init.sh:ro
+      - ./vault/init-out:/init-out
+      - ./vault/approle:/approle
+    depends_on: [vault]
+    networks: [net_vault]
+    environment:
+      NC_DB_NAME: ${MARIADB_DATABASE}
+      NC_DB_USER: ${MARIADB_USER}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/ready"]
+      interval: 5s
+      retries: 30
+
+  vault-agent-wordpress:
+    image: hashicorp/vault:1.13.3
+    container_name: vault-agent-wp
+    command: agent -config=/vault/agent/agent.hcl
+    restart: unless-stopped
+    depends_on:
+      vault-init: { condition: service_healthy }
+    networks: [net_vault]
+    volumes:
+      - ./vault/agent/wordpress.hcl:/vault/agent/agent.hcl:ro
+      - ./vault/approle/wordpress:/vault/approle:ro
+      - wp_secrets:/secrets
+    healthcheck:
+      test: ["CMD", "test", "-s", "/secrets/db_password"]
+      interval: 5s
+      retries: 30
+
+  vault-agent-nextcloud:
+    image: hashicorp/vault:1.13.3
+    container_name: vault-agent-nc
+    command: agent -config=/vault/agent/agent.hcl
+    restart: unless-stopped
+    depends_on:
+      vault-init: { condition: service_healthy }
+    networks: [net_vault]
+    volumes:
+      - ./vault/agent/nextcloud.hcl:/vault/agent/agent.hcl:ro
+      - ./vault/approle/nextcloud:/vault/approle:ro
+      - nc_secrets:/secrets
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /secrets/db_password && test -s /secrets/db_name && test -s /secrets/db_user"]
+      interval: 5s
+      retries: 30
 
 networks:
   net_ext:
     name: net_ext
     driver: bridge
+    external: false
   net_db:
     name: net_db
+    driver: bridge
+    external: false
+  net_vault:
+    name: net_vault
     driver: bridge
     external: false
 
@@ -118,3 +194,10 @@ volumes:
   nextcloud_data:
   wordpress_db_data:
   wordpress_data:
+  vault_data:
+  wp_secrets:
+    driver: local
+    driver_opts: { type: tmpfs, device: tmpfs }
+  nc_secrets:
+    driver: local
+    driver_opts: { type: tmpfs, device: tmpfs }
