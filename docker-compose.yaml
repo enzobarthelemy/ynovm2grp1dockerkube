@@ -1,0 +1,50 @@
+services:
+  mariadb:
+    image: mariadb:lts-ubi10
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    environment:
+      - MARIADB_ROOT_PASSWORD= ${MARIADB_ROOT_PASSWORD}
+      - MARIADB_USER= ${MARIADB_USER}
+      - MARIADB_PASSWORD= ${MARIADB_PASSWORD}
+      - MARIADB_DATABASE= ${MARIADB_DATABSE}
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+    networks:
+      - net_db
+
+  nextcloud:
+    image: nextcloud:latest
+    volumes:
+      - nextcloud_data:/var/www/html
+    environment:
+      - MYSQL_HOST=mariadb
+      - MYSQL_DATABASE= ${MARIADB_DATABASE}
+      - MYSQL_USER= ${MARIADB_USER}
+      - MYSQL_PASSWORD= ${MARIADB_PASSWORD}
+    restart: always
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    ports:
+      - "80:80"
+    networks:
+      - net_ext
+      - net_db
+
+networks:
+  net_ext:
+    name: net_ext
+    driver: bridge
+  net_db:
+    name: net_db
+    driver: bridge
+    external: false
+
+volumes:
+    mariadb_data:
+    nextcloud_data:
