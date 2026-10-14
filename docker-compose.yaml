@@ -38,14 +38,14 @@ services:
       retries: 10
 
   wordpress:
-    image: ebynov/ynovm2dockerwp:1.1.0
+    image: ebynov/ynovm2dockerwp:1.2.0
     container_name: wordpress
     restart: unless-stopped
     depends_on:
       wordpress-db:
         condition: service_healthy
     ports:
-      - "8081:80"
+      - "8080:8080"
     environment:
       WORDPRESS_DB_HOST: wordpress-db:3306
       WORDPRESS_DB_USER: ${WORDPRESS_DB_USER}
