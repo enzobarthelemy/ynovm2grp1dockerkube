@@ -3,7 +3,7 @@ services:
     image: mariadb:lts-ubi10
     container_name: nextcloud-db
     volumes:
-      - mariadb_data:/var/lib/mysql
+      - nextcloud_db_data:/var/lib/mysql
     environment:
       - MARIADB_ROOT_PASSWORD=${MARIADB_ROOT_PASSWORD}
       - MARIADB_USER=${MARIADB_USER}
@@ -60,7 +60,7 @@ services:
       - net_ext
 
   nextcloud:
-    image: nextcloud:latest
+    image: nextcloud:32.0.15-apache
     container_name: nextcloud
     volumes:
       - nextcloud_data:/var/www/html
@@ -89,7 +89,7 @@ networks:
     external: false
 
 volumes:
-  mariadb_data:
+  nextcloud_db_data:
   nextcloud_data:
   wordpress_db_data:
   wordpress_data:
