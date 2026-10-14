@@ -18,7 +18,7 @@ services:
       - net_db
 
   wordpress-db:
-    image: mariadb:10.6
+    image: mariadb:lts-ubi10
     container_name: wordpress-db
     restart: unless-stopped
     environment:
