@@ -1,6 +1,7 @@
 services:
   mariadb:
     image: mariadb:lts-ubi10
+    container_name: nextcloud-db
     volumes:
       - mariadb_data:/var/lib/mysql
     environment:
@@ -60,6 +61,7 @@ services:
 
   nextcloud:
     image: nextcloud:latest
+    container_name: nextcloud
     volumes:
       - nextcloud_data:/var/www/html
     environment:
