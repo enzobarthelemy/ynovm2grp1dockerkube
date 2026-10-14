@@ -81,7 +81,7 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=net_ext
-      - traefik.http.routers.wordpress.rule=Host(`wp.localhost`)
+      - traefik.http.routers.wordpress.rule=Host(`wp.ynovm2.lab`)
       - traefik.http.routers.wordpress.entrypoints=web
       - traefik.http.services.wordpress.loadbalancer.server.port=8080
 
@@ -106,7 +106,7 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=net_ext
-      - traefik.http.routers.nextcloud.rule=Host(`cloud.localhost`)
+      - traefik.http.routers.nextcloud.rule=Host(`cloud.ynovm2.lab`)
       - traefik.http.routers.nextcloud.entrypoints=web
       - traefik.http.services.nextcloud.loadbalancer.server.port=80
 
