@@ -1,6 +1,6 @@
 FROM wordpress:7.1.3-php8.3-apache
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
         libzip-dev \
         libicu-dev \
         less \

@@ -38,7 +38,7 @@ services:
       retries: 10
 
   wordpress:
-    image: ebynov/ynovm2dockerwp:1.2.0
+    image: ebynov/ynovm2dockerwp:1.2.1
     container_name: wordpress
     restart: unless-stopped
     depends_on:
