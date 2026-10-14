@@ -1,4 +1,21 @@
 services:
+  traefik:
+    image: traefik:v3.6.2
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --api.dashboard=true
+    ports:
+      - "80:80"
+      - "8088:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - net_ext
+
   mariadb:
     image: mariadb:lts-ubi10
     container_name: nextcloud-db
@@ -44,8 +61,6 @@ services:
     depends_on:
       wordpress-db:
         condition: service_healthy
-    ports:
-      - "8080:8080"
     environment:
       WORDPRESS_DB_HOST: wordpress-db:3306
       WORDPRESS_DB_USER: ${WORDPRESS_DB_USER}
@@ -56,6 +71,13 @@ services:
     networks:
       - net_db
       - net_ext
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=net_ext
+      - traefik.http.routers.wordpress.rule=Host(`wp.localhost`)
+      - traefik.http.routers.wordpress.entrypoints=web
+      - traefik.http.services.wordpress.loadbalancer.server.port=8080
+
 
   nextcloud:
     image: nextcloud:32.0.15-apache
@@ -71,11 +93,16 @@ services:
     depends_on:
       mariadb:
         condition: service_healthy
-    ports:
-      - "80:80"
     networks:
       - net_ext
       - net_db
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=net_ext
+      - traefik.http.routers.nextcloud.rule=Host(`cloud.localhost`)
+      - traefik.http.routers.nextcloud.entrypoints=web
+      - traefik.http.services.nextcloud.loadbalancer.server.port=80
+
 
 networks:
   net_ext:
