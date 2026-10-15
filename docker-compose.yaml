@@ -1,3 +1,5 @@
+name: ynovm2grp1dockerkube   # nom de projet fixe (préfixe des volumes, filtre du dashboard Grafana)
+
 services:
 
   # ===========================================================================
@@ -210,11 +212,10 @@ services:
       interval: 5s
       retries: 30
 
-
   # ===========================================================================
   # Supervision
   # ===========================================================================
- 
+
   cadvisor:
     image: ghcr.io/google/cadvisor:v0.60.6
     container_name: cadvisor
@@ -236,7 +237,7 @@ services:
     restart: unless-stopped
     networks:
       - monitoring
- 
+
   prometheus:
     image: prom/prometheus:v2.55.1
     container_name: prometheus
@@ -250,7 +251,7 @@ services:
       - cadvisor
     networks:
       - monitoring
- 
+
   grafana:
     image: grafana/grafana-oss:11.3.0
     container_name: grafana
