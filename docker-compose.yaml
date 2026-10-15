@@ -210,10 +210,11 @@ services:
       interval: 5s
       retries: 30
 
+
   # ===========================================================================
   # Supervision
   # ===========================================================================
-
+ 
   cadvisor:
     image: ghcr.io/google/cadvisor:v0.60.6
     container_name: cadvisor
@@ -235,7 +236,7 @@ services:
     restart: unless-stopped
     networks:
       - monitoring
-
+ 
   prometheus:
     image: prom/prometheus:v2.55.1
     container_name: prometheus
@@ -249,19 +250,19 @@ services:
       - cadvisor
     networks:
       - monitoring
-
+ 
   grafana:
     image: grafana/grafana-oss:11.3.0
     container_name: grafana
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD__FILE: /run/vault/admin_password
+      GF_SERVER_DOMAIN: monitor.ynovm2.lab
+      GF_SERVER_ROOT_URL: http://monitor.ynovm2.lab/
     volumes:
       - grafana_data:/var/lib/grafana
       - grafana_secrets:/run/vault:ro
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
-    ports:
-      - "3004:3000"
     restart: unless-stopped
     depends_on:
       prometheus:
@@ -270,6 +271,13 @@ services:
         condition: service_healthy
     networks:
       - monitoring
+      - net_ext
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=net_ext
+      - traefik.http.routers.grafana.rule=Host(`monitor.ynovm2.lab`)
+      - traefik.http.routers.grafana.entrypoints=web
+      - traefik.http.services.grafana.loadbalancer.server.port=3000
 
 networks:
   net_ext:
