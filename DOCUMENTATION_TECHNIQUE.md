@@ -821,4 +821,4 @@ docker compose exec wordpress wp option update siteurl "http://wp.ynovm2.lab"
 ## 15. Actions à finaliser/corriger
 
 - Fusion de docker-compose.yaml et docker-compose.monitoring.yml
-- Faire disparaitre les secrets des containers applicatifs (actuellement visibles dans /run/vault)
+- Faire disparaitre les secrets des containers applicatifs (actuellement visibles dans /run/vault) --> /dev/shm
