@@ -1,4 +1,9 @@
 services:
+
+  # ===========================================================================
+  # Reverse proxy
+  # ===========================================================================
+
   traefik:
     image: traefik:v3.6.2
     container_name: traefik
@@ -8,6 +13,7 @@ services:
       - --providers.docker.exposedbydefault=false
       - --entrypoints.web.address=:80
       - --api.dashboard=true
+      - --api.insecure=true          # sert le dashboard sur :8080 (labo uniquement)
     ports:
       - "80:80"
       - "8088:8080"
@@ -15,6 +21,10 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - net_ext
+
+  # ===========================================================================
+  # Nextcloud
+  # ===========================================================================
 
   mariadb:
     image: mariadb:lts-ubi10
@@ -37,6 +47,35 @@ services:
     restart: always
     networks:
       - net_db
+
+  nextcloud:
+    image: nextcloud:32.0.15-apache
+    container_name: nextcloud
+    volumes:
+      - nextcloud_data:/var/www/html
+      - nc_secrets:/run/vault:ro
+    environment:
+      MYSQL_HOST: mariadb
+      MYSQL_DATABASE_FILE: /run/vault/db_name
+      MYSQL_USER_FILE: /run/vault/db_user
+      MYSQL_PASSWORD_FILE: /run/vault/db_password
+    restart: always
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    networks:
+      - net_ext
+      - net_db
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=net_ext
+      - traefik.http.routers.nextcloud.rule=Host(`cloud.ynovm2.lab`)
+      - traefik.http.routers.nextcloud.entrypoints=web
+      - traefik.http.services.nextcloud.loadbalancer.server.port=80
+
+  # ===========================================================================
+  # WordPress
+  # ===========================================================================
 
   wordpress-db:
     image: mariadb:lts-ubi10
@@ -85,30 +124,9 @@ services:
       - traefik.http.routers.wordpress.entrypoints=web
       - traefik.http.services.wordpress.loadbalancer.server.port=8080
 
-  nextcloud:
-    image: nextcloud:32.0.15-apache
-    container_name: nextcloud
-    volumes:
-      - nextcloud_data:/var/www/html
-      - nc_secrets:/run/vault:ro
-    environment:
-      MYSQL_HOST: mariadb
-      MYSQL_DATABASE_FILE: /run/vault/db_name
-      MYSQL_USER_FILE: /run/vault/db_user
-      MYSQL_PASSWORD_FILE: /run/vault/db_password
-    restart: always
-    depends_on:
-      mariadb:
-        condition: service_healthy
-    networks:
-      - net_ext
-      - net_db
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=net_ext
-      - traefik.http.routers.nextcloud.rule=Host(`cloud.ynovm2.lab`)
-      - traefik.http.routers.nextcloud.entrypoints=web
-      - traefik.http.services.nextcloud.loadbalancer.server.port=80
+  # ===========================================================================
+  # Vault (gestion des secrets)
+  # ===========================================================================
 
   vault:
     image: hashicorp/vault:1.13.3
@@ -175,19 +193,97 @@ services:
       interval: 5s
       retries: 30
 
+  vault-agent-grafana:
+    image: hashicorp/vault:1.13.3
+    container_name: vault-agent-grafana
+    command: agent -config=/vault/agent/agent.hcl
+    restart: unless-stopped
+    depends_on:
+      vault-init: { condition: service_healthy }
+    networks: [net_vault]
+    volumes:
+      - ./vault/agent/grafana.hcl:/vault/agent/agent.hcl:ro
+      - ./vault/approle/grafana:/vault/approle:ro
+      - grafana_secrets:/secrets
+    healthcheck:
+      test: ["CMD", "test", "-s", "/secrets/admin_password"]
+      interval: 5s
+      retries: 30
+
+  # ===========================================================================
+  # Supervision
+  # ===========================================================================
+
+  cadvisor:
+    image: ghcr.io/google/cadvisor:v0.60.6
+    container_name: cadvisor
+    privileged: true
+    cgroup: host
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=10s
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.project,com.docker.compose.service
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9091:9090"
+    restart: unless-stopped
+    depends_on:
+      - cadvisor
+    networks:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana-oss:11.3.0
+    container_name: grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/vault/admin_password
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - grafana_secrets:/run/vault:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3004:3000"
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_started
+      vault-agent-grafana:
+        condition: service_healthy
+    networks:
+      - monitoring
+
 networks:
   net_ext:
     name: net_ext
     driver: bridge
-    external: false
   net_db:
     name: net_db
     driver: bridge
-    external: false
   net_vault:
     name: net_vault
     driver: bridge
-    external: false
+  monitoring:
+    name: monitoring
+    driver: bridge
 
 volumes:
   nextcloud_db_data:
@@ -195,9 +291,14 @@ volumes:
   wordpress_db_data:
   wordpress_data:
   vault_data:
+  prometheus_data:
+  grafana_data:
   wp_secrets:
     driver: local
     driver_opts: { type: tmpfs, device: tmpfs }
   nc_secrets:
+    driver: local
+    driver_opts: { type: tmpfs, device: tmpfs }
+  grafana_secrets:
     driver: local
     driver_opts: { type: tmpfs, device: tmpfs }

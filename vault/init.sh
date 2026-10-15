@@ -27,11 +27,18 @@ unseal
 vault secrets list | grep -q '^secret/' || vault secrets enable -path=secret kv-v2
 vault auth list    | grep -q '^approle/' || vault auth enable approle
 
-# 4. Pour chaque application : secrets, policy, AppRole, identifiants
+# 4. Secrets (créés une seule fois, jamais écrasés)
 for app in wordpress nextcloud; do
   vault kv get secret/$app/db >/dev/null 2>&1 || \
     vault kv put secret/$app/db password="$(gen)" root_password="$(gen)" >/dev/null
+done
+vault kv patch secret/nextcloud/db name="$NC_DB_NAME" user="$NC_DB_USER" >/dev/null
 
+vault kv get secret/grafana/admin >/dev/null 2>&1 || \
+  vault kv put secret/grafana/admin password="$(gen)" >/dev/null
+
+# 5. Pour chaque application : policy en lecture seule, AppRole, identifiants
+for app in wordpress nextcloud grafana; do
   vault policy write $app - >/dev/null <<EOF
 path "secret/data/$app/*" { capabilities = ["read"] }
 EOF
@@ -44,10 +51,9 @@ EOF
     vault write -f -field=secret_id auth/approle/role/$app/secret-id > /approle/$app/secret_id
   chmod 644 /approle/$app/role_id /approle/$app/secret_id
 done
-vault kv patch secret/nextcloud/db name="$NC_DB_NAME" user="$NC_DB_USER" >/dev/null
 
-# 5. Prêt : le healthcheck du conteneur regarde ce fichier
+# 6. Prêt : le healthcheck du conteneur regarde ce fichier
 touch /tmp/ready
 
-# 6. Redescellement automatique après un redémarrage de Vault
+# 7. Redescellement automatique après un redémarrage de Vault
 while true; do unseal || true; sleep 10; done

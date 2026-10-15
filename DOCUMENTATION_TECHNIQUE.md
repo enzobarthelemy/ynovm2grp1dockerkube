@@ -2,20 +2,20 @@
 
 ## 1. Présentation
 
-Le projet fournit une infrastructure web locale répartie en deux fichiers Docker Compose.
+Le projet fournit une infrastructure web locale décrite dans un seul fichier `docker-compose.yaml`, qui regroupe la partie applicative et la supervision.
 
-Stack applicative (`docker-compose.yaml`) :
+Partie applicative :
 
 - Traefik comme reverse proxy HTTP.
 - Nextcloud comme plateforme de stockage et de collaboration.
 - WordPress comme site web CMS (image personnalisée).
 - Deux bases MariaDB séparées, une par application.
 - HashiCorp Vault pour la génération et la distribution des secrets de base de données.
-- Deux Vault Agents (un par application) qui écrivent les secrets dans des volumes en mémoire (tmpfs).
+- Trois Vault Agents (WordPress, Nextcloud, Grafana) qui écrivent les secrets dans des volumes en mémoire (tmpfs).
 - Trois réseaux Docker dédiés : exposition web, bases de données, Vault.
 - Des volumes Docker nommés pour conserver les données lors du remplacement des conteneurs.
 
-Stack de supervision (`docker-compose.monitoring.yml`) :
+Partie supervision :
 
 - cAdvisor pour la collecte des métriques des conteneurs.
 - Prometheus pour le stockage des métriques.
@@ -24,8 +24,7 @@ Stack de supervision (`docker-compose.monitoring.yml`) :
 Arborescence utile :
 
 ```text
-docker-compose.yaml                 stack applicative
-docker-compose.monitoring.yml       stack de supervision
+docker-compose.yaml                 stack complète (applications, Vault, supervision)
 prometheus.yml                      configuration Prometheus
 grafana/provisioning/               datasource + dashboard Grafana
 vault/config/vault.hcl              configuration du serveur Vault
@@ -73,6 +72,11 @@ SCAN.md                             résultats des scans Trivy
    Supervision (réseau monitoring) :
 
    cAdvisor --> Prometheus :9091 --> Grafana :3004
+                                         ^
+                                         | /run/vault (ro)
+                              volume grafana_secrets (tmpfs)
+                                         ^
+                                vault-agent-grafana --> vault (net_vault)
 ```
 
 Traefik est le seul point d’entrée HTTP vers les applications (port `80` de l’hôte). Les applications web et les bases ne publient aucun port vers l’hôte.
@@ -104,6 +108,7 @@ Options principales :
 --providers.docker.exposedbydefault=false
 --entrypoints.web.address=:80
 --api.dashboard=true
+--api.insecure=true
 ```
 
 `exposedbydefault=false` signifie qu’un service n’est pas publié par Traefik sans le label explicite :
@@ -112,7 +117,7 @@ Options principales :
 traefik.enable=true
 ```
 
-> Remarque : avec Traefik v3, le dashboard n’est servi sur le port interne `8080` que si `--api.insecure=true` est activé, ou si un routeur pointant vers `api@internal` est déclaré. En l’état, le port `8088` peut ne rien répondre. Voir la section 13.
+`--api.insecure=true` sert l’API et le dashboard sur le port interne `8080` (publié sur `8088`), sans authentification. Réservé au labo : voir la section 14.
 
 ### 3.2 Nextcloud
 
@@ -308,12 +313,14 @@ Le script est idempotent et réalise, dans l’ordre :
 2. Initialisation (une seule fois) avec une clé de descellement unique (`-key-shares=1 -key-threshold=1`). La clé et le root token sont écrits dans `vault/init-out/keys.txt` (droits `600`).
 3. Descellement de Vault.
 4. Activation du moteur `kv-v2` sur `secret/` et de la méthode d’authentification `approle`.
-5. Pour chaque application (`wordpress`, `nextcloud`) :
-   - création, si absent, du secret `secret/<app>/db` avec `password` et `root_password` aléatoires (32 caractères) ;
+5. Création des secrets, uniquement s’ils sont absents (jamais écrasés) :
+   - `secret/wordpress/db` et `secret/nextcloud/db` avec `password` et `root_password` aléatoires (32 caractères) ;
+   - ajout de `name` et `user` dans `secret/nextcloud/db` à partir de `MARIADB_DATABASE` et `MARIADB_USER` ;
+   - `secret/grafana/admin` avec un `password` aléatoire (32 caractères).
+6. Pour chaque application (`wordpress`, `nextcloud`, `grafana`) :
    - création d’une policy `<app>` en lecture seule sur `secret/data/<app>/*` ;
    - création d’un rôle AppRole `<app>` (TTL du token : 1 h, maximum 24 h) ;
    - écriture de `role_id` et `secret_id` dans `vault/approle/<app>/`.
-6. Ajout de `name` et `user` dans `secret/nextcloud/db` à partir de `MARIADB_DATABASE` et `MARIADB_USER`.
 7. Création de `/tmp/ready` (débloque les agents).
 8. Boucle de redescellement automatique toutes les 10 secondes.
 
@@ -321,19 +328,19 @@ Le conteneur reste donc actif en permanence pour redesceller Vault après un red
 
 ### 3.8 Vault Agents
 
-| Élément | WordPress | Nextcloud |
-|---|---|---|
-| Service | `vault-agent-wordpress` | `vault-agent-nextcloud` |
-| Conteneur | `vault-agent-wp` | `vault-agent-nc` |
-| Image | `hashicorp/vault:1.13.3` | `hashicorp/vault:1.13.3` |
-| Config | `vault/agent/wordpress.hcl` | `vault/agent/nextcloud.hcl` |
-| Identifiants AppRole | `vault/approle/wordpress` | `vault/approle/nextcloud` |
-| Volume de sortie | `wp_secrets` → `/secrets` | `nc_secrets` → `/secrets` |
-| Fichiers produits | `db_password`, `db_root_password` | `db_password`, `db_root_password`, `db_name`, `db_user` |
-| Healthcheck | `db_password` non vide | les trois fichiers `db_password`, `db_name`, `db_user` non vides |
-| Réseau | `net_vault` | `net_vault` |
+| Élément | WordPress | Nextcloud | Grafana |
+|---|---|---|---|
+| Service | `vault-agent-wordpress` | `vault-agent-nextcloud` | `vault-agent-grafana` |
+| Conteneur | `vault-agent-wp` | `vault-agent-nc` | `vault-agent-grafana` |
+| Image | `hashicorp/vault:1.13.3` | `hashicorp/vault:1.13.3` | `hashicorp/vault:1.13.3` |
+| Config | `vault/agent/wordpress.hcl` | `vault/agent/nextcloud.hcl` | `vault/agent/grafana.hcl` |
+| Identifiants AppRole | `vault/approle/wordpress` | `vault/approle/nextcloud` | `vault/approle/grafana` |
+| Volume de sortie | `wp_secrets` → `/secrets` | `nc_secrets` → `/secrets` | `grafana_secrets` → `/secrets` |
+| Fichiers produits | `db_password`, `db_root_password` | `db_password`, `db_root_password`, `db_name`, `db_user` | `admin_password` |
+| Healthcheck | `db_password` non vide | `db_password`, `db_name`, `db_user` non vides | `admin_password` non vide |
+| Réseau | `net_vault` | `net_vault` | `net_vault` |
 
-Chaque agent s’authentifie par AppRole, lit uniquement le secret de son application (policy dédiée) et le rend sous forme de fichiers via des blocs `template`. Les volumes `wp_secrets` et `nc_secrets` sont de type `tmpfs` : les secrets ne sont jamais écrits sur disque et disparaissent à l’arrêt.
+Chaque agent s’authentifie par AppRole, lit uniquement le secret de son application (policy dédiée) et le rend sous forme de fichiers via des blocs `template`. Les volumes `wp_secrets`, `nc_secrets` et `grafana_secrets` sont de type `tmpfs` : les secrets ne sont jamais écrits sur disque et disparaissent à l’arrêt.
 
 ### 3.9 Chaîne de démarrage
 
@@ -346,18 +353,21 @@ vault
      -> vault-agent-nextcloud (healthy : secrets écrits)
         -> mariadb            (healthy)
            -> nextcloud
+     -> vault-agent-grafana   (healthy : secret écrit)
+        -> grafana            (+ prometheus démarré, lui-même après cadvisor)
 traefik                       (indépendant)
 ```
 
 Le premier démarrage peut prendre quelques dizaines de secondes, le temps que Vault soit initialisé et que les agents produisent les fichiers.
 
-## 4. Stack de supervision
+## 4. Supervision
 
 ### 4.1 cAdvisor
 
 | Élément | Valeur |
 |---|---|
 | Service | `cadvisor` |
+| Conteneur | `cadvisor` |
 | Image | `ghcr.io/google/cadvisor:v0.60.6` |
 | Mode | `privileged`, `cgroup: host` |
 | Réseau | `monitoring` |
@@ -380,6 +390,7 @@ Seuls les labels Compose `project` et `service` sont exportés, ce qui permet au
 | Élément | Valeur |
 |---|---|
 | Service | `prometheus` |
+| Conteneur | `prometheus` |
 | Image | `prom/prometheus:v2.55.1` |
 | Port hôte | `9091` → `9090` |
 | Configuration | `./prometheus.yml` (lecture seule) |
@@ -398,12 +409,22 @@ cadvisor:8080
 | Élément | Valeur |
 |---|---|
 | Service | `grafana` |
+| Conteneur | `grafana` |
 | Image | `grafana/grafana-oss:11.3.0` |
 | Port hôte | `3004` → `3000` |
-| Compte admin | `admin` / valeur `GRAFANA_PASSWORD` du `.env` |
+| Compte admin | `admin` / secret Vault `secret/grafana/admin` → `password` |
+| Secrets | volume `grafana_secrets` monté sur `/run/vault` (lecture seule) |
 | Provisioning | `./grafana/provisioning` (lecture seule) |
 | Volume | `grafana_data` |
 | Réseau | `monitoring` |
+
+Grafana lit le mot de passe admin via `GF_SECURITY_ADMIN_PASSWORD__FILE` (suffixe `__FILE` natif de Grafana). Pour le récupérer :
+
+```powershell
+docker compose exec grafana cat /run/vault/admin_password
+```
+
+Grafana n’applique ce mot de passe qu’à la création de sa base interne (premier démarrage avec un volume `grafana_data` vide). Sur un volume existant, voir la section 12 « Le mot de passe Grafana ne fonctionne pas ».
 
 Éléments provisionnés automatiquement :
 
@@ -426,7 +447,7 @@ Une variable `service` permet de filtrer par service Compose.
 |---|---|---|
 | `net_ext` | `traefik`, `nextcloud`, `wordpress` | Exposition web via Traefik |
 | `net_db` | `mariadb`, `nextcloud`, `wordpress-db`, `wordpress` | Accès aux bases de données |
-| `net_vault` | `vault`, `vault-init`, `vault-agent-wordpress`, `vault-agent-nextcloud` | Flux vers Vault |
+| `net_vault` | `vault`, `vault-init`, `vault-agent-wordpress`, `vault-agent-nextcloud`, `vault-agent-grafana` | Flux vers Vault |
 | `monitoring` | `cadvisor`, `prometheus`, `grafana` | Supervision |
 
 Les applications et les bases ne sont pas reliées à `net_vault` : elles ne parlent jamais à Vault directement et ne reçoivent que les fichiers produits par les agents.
@@ -492,6 +513,7 @@ ipconfig /flushdns
 | `ynovm2grp1dockerkube_vault_data` | disque | Stockage chiffré de Vault |
 | `ynovm2grp1dockerkube_wp_secrets` | tmpfs | Secrets WordPress rendus par l’agent |
 | `ynovm2grp1dockerkube_nc_secrets` | tmpfs | Secrets Nextcloud rendus par l’agent |
+| `ynovm2grp1dockerkube_grafana_secrets` | tmpfs | Mot de passe admin Grafana rendu par l’agent |
 | `ynovm2grp1dockerkube_prometheus_data` | disque | Séries temporelles Prometheus |
 | `ynovm2grp1dockerkube_grafana_data` | disque | Base interne Grafana |
 
@@ -511,14 +533,13 @@ Les volumes sur disque survivent à `docker compose down`. Les volumes tmpfs son
 
 ### 9.1 Fichier `.env`
 
-Le `.env` ne contient plus aucun mot de passe de base de données. Variables utilisées :
+Le `.env` ne contient plus aucun mot de passe : ils sont tous générés et distribués par Vault. Variables utilisées :
 
 ```text
 MARIADB_USER             utilisateur de la base Nextcloud (injecté dans Vault)
 MARIADB_DATABASE         nom de la base Nextcloud (injecté dans Vault)
 WORDPRESS_DB_NAME        nom de la base WordPress
 WORDPRESS_DB_USER        utilisateur de la base WordPress
-GRAFANA_PASSWORD         mot de passe du compte admin Grafana
 ```
 
 Le `.env` n’est pas versionné (`.gitignore`). Le modèle partageable est `.env.example`, qui ne contient que des valeurs vides.
@@ -529,6 +550,7 @@ Le `.env` n’est pas versionné (`.gitignore`). Le modèle partageable est `.en
 |---|---|---|
 | `secret/wordpress/db` | `password`, `root_password` | `vault-agent-wordpress` |
 | `secret/nextcloud/db` | `password`, `root_password`, `name`, `user` | `vault-agent-nextcloud` |
+| `secret/grafana/admin` | `password` | `vault-agent-grafana` |
 
 Consulter un secret (root token dans `vault/init-out/keys.txt`) :
 
@@ -558,27 +580,20 @@ Valider la configuration :
 
 ```powershell
 docker compose config
-docker compose -f docker-compose.yaml -f docker-compose.monitoring.yml config
 ```
 
-Démarrer la stack applicative seule :
+Démarrer l’ensemble de la stack :
 
 ```powershell
 docker compose up -d --pull always
 ```
 
-Démarrer la stack applicative et la supervision :
-
-```powershell
-docker compose -f docker-compose.yaml -f docker-compose.monitoring.yml up -d --pull always
-```
-
-Les deux fichiers partagent le même nom de projet (`ynovm2grp1dockerkube`). Lancer ensuite un `docker compose up` avec un seul fichier affichera un avertissement « orphan containers » pour les services de l’autre fichier ; ne pas utiliser `--remove-orphans` dans ce cas.
+Les conteneurs lancés auparavant avec `docker-compose.monitoring.yml` font partie du même projet : ils sont recréés automatiquement sous leurs nouveaux noms (`cadvisor`, `prometheus`, `grafana`) au premier `up`, en conservant les volumes `prometheus_data` et `grafana_data`.
 
 Afficher l’état :
 
 ```powershell
-docker compose -f docker-compose.yaml -f docker-compose.monitoring.yml ps
+docker compose ps
 ```
 
 Consulter les logs :
@@ -595,13 +610,13 @@ docker compose logs -f wordpress
 Arrêter les services sans supprimer les conteneurs :
 
 ```powershell
-docker compose -f docker-compose.yaml -f docker-compose.monitoring.yml stop
+docker compose stop
 ```
 
 Arrêter et supprimer les conteneurs et réseaux :
 
 ```powershell
-docker compose -f docker-compose.yaml -f docker-compose.monitoring.yml down
+docker compose down
 ```
 
 Le `down` simple ne supprime pas les volumes nommés sur disque. `down -v` supprime tout, y compris `vault_data` : Vault sera réinitialisé avec de nouveaux mots de passe et un nouveau `keys.txt` au démarrage suivant.
@@ -611,7 +626,7 @@ Le `down` simple ne supprime pas les volumes nommés sur disque. `down -v` suppr
 Vérifier les conteneurs :
 
 ```powershell
-docker compose -f docker-compose.yaml -f docker-compose.monitoring.yml ps
+docker compose ps
 ```
 
 Résultat attendu :
@@ -622,13 +637,14 @@ vault            Up
 vault-init       Up (healthy)
 vault-agent-wp   Up (healthy)
 vault-agent-nc   Up (healthy)
+vault-agent-grafana Up (healthy)
 nextcloud-db     Up (healthy)
 wordpress-db     Up (healthy)
 nextcloud        Up
 wordpress        Up (healthy)
-...-cadvisor-1   Up (healthy)
-...-prometheus-1 Up
-...-grafana-1    Up
+cadvisor         Up (healthy)
+prometheus       Up
+grafana          Up
 ```
 
 Vérifier Vault :
@@ -749,6 +765,23 @@ Le même problème apparaît si `vault_data` est supprimé alors que les volumes
 
 `vault/init-out/keys.txt` a été perdu ou ne correspond plus à `vault_data`. Sans sauvegarde de ce fichier, il faut supprimer `vault_data` (et les volumes de base associés) pour repartir d’une initialisation propre.
 
+### Le mot de passe Grafana ne fonctionne pas
+
+Le volume `grafana_data` a été créé avant le passage à Vault et conserve l’ancien mot de passe. Aligner le compte admin sur le secret Vault :
+
+```powershell
+docker compose exec grafana sh -c 'grafana cli admin reset-admin-password "$(cat /run/vault/admin_password)"'
+```
+
+### `vault-agent-grafana` redémarre en boucle après une mise à jour
+
+`vault-init` tournait déjà avec l’ancienne version de `init.sh` : le rôle AppRole `grafana` et le dossier `vault/approle/grafana` n’existent pas encore. Relancer le script :
+
+```powershell
+docker compose up -d --force-recreate vault-init
+docker compose up -d
+```
+
 ### Grafana n’affiche aucune donnée
 
 - Vérifier les cibles dans `http://localhost:9091/targets`.
@@ -775,7 +808,7 @@ image: ebynov/ynovm2dockerwp:1.2.1
 
 Le Dockerfile n’est donc pas reconstruit par `docker compose up`.
 
-> Point d’attention : le Dockerfile copie `wp-content/mu-plugins/`, mais ce dossier n’existe pas dans le dépôt (Git ne versionne pas les dossiers vides). Une reconstruction depuis un clone échouera tant qu’un fichier (par exemple `.gitkeep`) n’y est pas ajouté.
+Le dossier `wp-content/mu-plugins/` contient un fichier `.gitkeep` pour que Git le versionne : sans lui, le `COPY` du Dockerfile échoue lors d’une reconstruction depuis un clone.
 
 ### Scans de sécurité
 
@@ -820,5 +853,5 @@ docker compose exec wordpress wp option update siteurl "http://wp.ynovm2.lab"
 
 ## 15. Actions à finaliser/corriger
 
-- Fusion de docker-compose.yaml et docker-compose.monitoring.yml
+- ~~Fusion de docker-compose.yaml et docker-compose.monitoring.yml~~ (fait)
 - Faire disparaitre les secrets des containers applicatifs (actuellement visibles dans /run/vault) --> /dev/shm
