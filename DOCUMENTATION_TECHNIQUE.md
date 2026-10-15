@@ -2,7 +2,13 @@
 
 ## 1. Présentation
 
-Le projet fournit une infrastructure web locale décrite dans un seul fichier `docker-compose.yaml`, qui regroupe la partie applicative et la supervision.
+Le projet fournit une infrastructure web locale décrite dans un seul fichier `docker-compose.yaml`, qui regroupe la partie applicative, la gestion des secrets et la supervision. Le nom de projet Compose est fixé dans le fichier :
+
+```yaml
+name: ynovm2grp1dockerkube
+```
+
+Il sert de préfixe aux volumes et de filtre au dashboard Grafana, quel que soit le nom du dossier dans lequel le dépôt est cloné.
 
 Partie applicative :
 
@@ -10,16 +16,16 @@ Partie applicative :
 - Nextcloud comme plateforme de stockage et de collaboration.
 - WordPress comme site web CMS (image personnalisée).
 - Deux bases MariaDB séparées, une par application.
-- HashiCorp Vault pour la génération et la distribution des secrets de base de données.
+- HashiCorp Vault pour la génération et la distribution de tous les mots de passe (bases de données et admin Grafana).
 - Trois Vault Agents (WordPress, Nextcloud, Grafana) qui écrivent les secrets dans des volumes en mémoire (tmpfs).
-- Trois réseaux Docker dédiés : exposition web, bases de données, Vault.
+- Quatre réseaux Docker dédiés : exposition web, bases de données, Vault, supervision.
 - Des volumes Docker nommés pour conserver les données lors du remplacement des conteneurs.
 
 Partie supervision :
 
 - cAdvisor pour la collecte des métriques des conteneurs.
 - Prometheus pour le stockage des métriques.
-- Grafana avec une source de données et un tableau de bord provisionnés automatiquement.
+- Grafana, publié par Traefik sur `monitor.ynovm2.lab`, avec une source de données et un tableau de bord provisionnés automatiquement.
 
 Arborescence utile :
 
@@ -31,6 +37,7 @@ vault/config/vault.hcl              configuration du serveur Vault
 vault/init.sh                       initialisation / descellement de Vault
 vault/agent/nextcloud.hcl           configuration Vault Agent Nextcloud
 vault/agent/wordpress.hcl           configuration Vault Agent WordPress
+vault/agent/grafana.hcl             configuration Vault Agent Grafana
 customwp/                           sources de l’image WordPress personnalisée
 SCAN.md                             résultats des scans Trivy
 .env.example                        modèle de fichier .env
@@ -71,7 +78,7 @@ SCAN.md                             résultats des scans Trivy
 
    Supervision (réseau monitoring) :
 
-   cAdvisor --> Prometheus :9091 --> Grafana :3004
+   cAdvisor --> Prometheus :9091 --> Grafana:3000 <-- Traefik (Host: monitor.ynovm2.lab, net_ext)
                                          ^
                                          | /run/vault (ro)
                               volume grafana_secrets (tmpfs)
@@ -79,9 +86,9 @@ SCAN.md                             résultats des scans Trivy
                                 vault-agent-grafana --> vault (net_vault)
 ```
 
-Traefik est le seul point d’entrée HTTP vers les applications (port `80` de l’hôte). Les applications web et les bases ne publient aucun port vers l’hôte.
+Traefik est le seul point d’entrée HTTP vers les applications et Grafana (port `80` de l’hôte). Les applications web, Grafana et les bases ne publient aucun port vers l’hôte.
 
-## 3. Services de la stack applicative
+## 3. Services applicatifs et secrets
 
 ### 3.1 Traefik
 
@@ -411,12 +418,25 @@ cadvisor:8080
 | Service | `grafana` |
 | Conteneur | `grafana` |
 | Image | `grafana/grafana-oss:11.3.0` |
-| Port hôte | `3004` → `3000` |
+| Port interne | `3000` |
+| Domaine | `monitor.ynovm2.lab` (via Traefik) |
 | Compte admin | `admin` / secret Vault `secret/grafana/admin` → `password` |
 | Secrets | volume `grafana_secrets` monté sur `/run/vault` (lecture seule) |
 | Provisioning | `./grafana/provisioning` (lecture seule) |
 | Volume | `grafana_data` |
-| Réseau | `monitoring` |
+| Réseaux | `monitoring`, `net_ext` |
+
+Grafana est publié par Traefik, avec les labels :
+
+```yaml
+traefik.enable=true
+traefik.docker.network=net_ext
+traefik.http.routers.grafana.rule=Host(`monitor.ynovm2.lab`)
+traefik.http.routers.grafana.entrypoints=web
+traefik.http.services.grafana.loadbalancer.server.port=3000
+```
+
+`GF_SERVER_DOMAIN` et `GF_SERVER_ROOT_URL` sont alignés sur `http://monitor.ynovm2.lab/` pour que les redirections et les liens générés par Grafana utilisent le domaine public.
 
 Grafana lit le mot de passe admin via `GF_SECURITY_ADMIN_PASSWORD__FILE` (suffixe `__FILE` natif de Grafana). Pour le récupérer :
 
@@ -429,9 +449,9 @@ Grafana n’applique ce mot de passe qu’à la création de sa base interne (pr
 Éléments provisionnés automatiquement :
 
 - Datasource `Prometheus` (uid `prometheus`, par défaut) vers `http://prometheus:9090`.
-- Dashboard `conteneurs.json` (uid `docker-conteneurs`) dans le dossier `Docker`.
+- Dashboard « Conteneurs ynovm2grp1dockerkube » (`conteneurs.json`, uid `docker-conteneurs`) dans le dossier `Docker`.
 
-Le dashboard affiche, pour les conteneurs du projet `ynovm2grp1dockerkube` (hors outils de supervision) :
+Le dashboard affiche, pour les conteneurs du projet `ynovm2grp1dockerkube` (hors `cadvisor`, `prometheus` et `grafana`) :
 
 - nombre de conteneurs UP / DOWN (un conteneur non vu depuis 60 s est considéré DOWN) ;
 - CPU total en % de l’hôte et mémoire totale ;
@@ -445,7 +465,7 @@ Une variable `service` permet de filtrer par service Compose.
 
 | Réseau | Services connectés | Rôle |
 |---|---|---|
-| `net_ext` | `traefik`, `nextcloud`, `wordpress` | Exposition web via Traefik |
+| `net_ext` | `traefik`, `nextcloud`, `wordpress`, `grafana` | Exposition web via Traefik |
 | `net_db` | `mariadb`, `nextcloud`, `wordpress-db`, `wordpress` | Accès aux bases de données |
 | `net_vault` | `vault`, `vault-init`, `vault-agent-wordpress`, `vault-agent-nextcloud`, `vault-agent-grafana` | Flux vers Vault |
 | `monitoring` | `cadvisor`, `prometheus`, `grafana` | Supervision |
@@ -476,11 +496,23 @@ Navigateur
   -> wordpress:8080
 ```
 
+### Requête Grafana (supervision)
+
+```text
+Navigateur
+  -> monitor.ynovm2.lab:80
+  -> Traefik
+  -> règle Host(`monitor.ynovm2.lab`)
+  -> réseau net_ext
+  -> grafana:3000
+```
+
 Contrairement à `*.localhost`, le domaine `ynovm2.lab` n’est pas résolu automatiquement. Il faut ajouter dans `C:\Windows\System32\drivers\etc\hosts` (éditeur lancé en administrateur) :
 
 ```text
 127.0.0.1   cloud.ynovm2.lab
 127.0.0.1   wp.ynovm2.lab
+127.0.0.1   monitor.ynovm2.lab
 ```
 
 Puis vider le cache DNS si nécessaire :
@@ -498,7 +530,7 @@ ipconfig /flushdns
 | `http://localhost:8088` | API / dashboard Traefik | toutes interfaces |
 | `http://127.0.0.1:8200` | Vault (UI + API) | boucle locale uniquement |
 | `http://localhost:9091` | Prometheus | toutes interfaces |
-| `http://localhost:3004` | Grafana | toutes interfaces |
+| `http://monitor.ynovm2.lab` | Grafana | via Traefik, port 80 |
 
 ## 8. Volumes et fichiers persistants
 
@@ -552,6 +584,8 @@ Le `.env` n’est pas versionné (`.gitignore`). Le modèle partageable est `.en
 | `secret/nextcloud/db` | `password`, `root_password`, `name`, `user` | `vault-agent-nextcloud` |
 | `secret/grafana/admin` | `password` | `vault-agent-grafana` |
 
+Les mots de passe ne sont générés qu’une fois. En revanche, `name` et `user` de Nextcloud sont réécrits depuis le `.env` à chaque démarrage de `vault-init` : modifier ces variables après l’installation désynchronise Vault et la base existante.
+
 Consulter un secret (root token dans `vault/init-out/keys.txt`) :
 
 ```powershell
@@ -588,7 +622,7 @@ Démarrer l’ensemble de la stack :
 docker compose up -d --pull always
 ```
 
-Les conteneurs lancés auparavant avec `docker-compose.monitoring.yml` font partie du même projet : ils sont recréés automatiquement sous leurs nouveaux noms (`cadvisor`, `prometheus`, `grafana`) au premier `up`, en conservant les volumes `prometheus_data` et `grafana_data`.
+Migration depuis l’ancienne organisation en deux fichiers : `docker-compose.monitoring.yml` n’est plus utilisé et doit être supprimé du dépôt (`git rm docker-compose.monitoring.yml`). Les conteneurs qu’il avait lancés font partie du même projet : ils sont recréés sous leurs nouveaux noms (`cadvisor`, `prometheus`, `grafana`) au premier `up`, en conservant les volumes `prometheus_data` et `grafana_data`.
 
 Afficher l’état :
 
@@ -603,8 +637,10 @@ docker compose logs -f traefik
 docker compose logs -f vault-init
 docker compose logs -f vault-agent-wordpress
 docker compose logs -f vault-agent-nextcloud
+docker compose logs -f vault-agent-grafana
 docker compose logs -f nextcloud
 docker compose logs -f wordpress
+docker compose logs -f grafana
 ```
 
 Arrêter les services sans supprimer les conteneurs :
@@ -635,9 +671,9 @@ Résultat attendu :
 traefik          Up
 vault            Up
 vault-init       Up (healthy)
-vault-agent-wp   Up (healthy)
-vault-agent-nc   Up (healthy)
-vault-agent-grafana Up (healthy)
+vault-agent-wp       Up (healthy)
+vault-agent-nc       Up (healthy)
+vault-agent-grafana  Up (healthy)
 nextcloud-db     Up (healthy)
 wordpress-db     Up (healthy)
 nextcloud        Up
@@ -660,6 +696,7 @@ Vérifier la présence des secrets rendus :
 ```powershell
 docker compose exec vault-agent-wordpress ls -l /secrets
 docker compose exec vault-agent-nextcloud ls -l /secrets
+docker compose exec vault-agent-grafana ls -l /secrets
 ```
 
 Tester les applications :
@@ -667,6 +704,7 @@ Tester les applications :
 ```powershell
 curl.exe -I http://wp.ynovm2.lab/
 curl.exe -I http://cloud.ynovm2.lab/
+curl.exe -I http://monitor.ynovm2.lab/
 ```
 
 Vérifier la configuration WordPress :
@@ -697,7 +735,7 @@ cloud.ynovm2.lab
 Vérifier la supervision :
 
 - Prometheus : `http://localhost:9091/targets` → cibles `prometheus` et `cadvisor` à l’état `UP`.
-- Grafana : `http://localhost:3004` → dossier `Docker` → dashboard « Conteneurs Nextcloud ».
+- Grafana : `http://monitor.ynovm2.lab` → dossier `Docker` → dashboard « Conteneurs ynovm2grp1dockerkube ».
 
 ## 12. Dépannage
 
@@ -708,6 +746,7 @@ docker compose ps
 docker logs traefik
 docker inspect wordpress
 docker inspect nextcloud
+docker inspect grafana
 ```
 
 Contrôler notamment :
@@ -744,6 +783,7 @@ docker compose logs vault
 docker compose logs vault-init
 docker compose logs vault-agent-wordpress
 docker compose logs vault-agent-nextcloud
+docker compose logs vault-agent-grafana
 ```
 
 Causes fréquentes :
@@ -785,7 +825,7 @@ docker compose up -d
 ### Grafana n’affiche aucune donnée
 
 - Vérifier les cibles dans `http://localhost:9091/targets`.
-- Le dashboard filtre sur le projet `ynovm2grp1dockerkube` : la stack doit être lancée depuis un dossier portant ce nom (ou avec `-p ynovm2grp1dockerkube`).
+- Le dashboard filtre sur le projet `ynovm2grp1dockerkube` : ne pas surcharger le nom de projet avec `-p` ou `COMPOSE_PROJECT_NAME`.
 - Sous Docker Desktop / WSL2, cAdvisor peut ne pas voir certains montages ; consulter `docker compose logs cadvisor`.
 
 ## 13. Image WordPress personnalisée
@@ -825,10 +865,10 @@ La version `1.2.1` intègre les correctifs disponibles. Le risque résiduel est 
 
 Acquis :
 
-- Les mots de passe de base ne sont plus dans le `.env` : ils sont générés aléatoirement par Vault.
+- Aucun mot de passe dans le `.env` : bases et admin Grafana sont générés aléatoirement par Vault.
 - Chaque agent ne lit que le secret de son application (policy AppRole dédiée, token de 1 h).
 - Les secrets rendus vivent en tmpfs, montés en lecture seule dans les conteneurs consommateurs.
-- Les bases et les applications ne sont pas publiées sur l’hôte ; Vault n’est exposé que sur `127.0.0.1`.
+- Les bases, les applications et Grafana ne sont pas publiées directement sur l’hôte (accès web uniquement via Traefik) ; Vault n’est exposé que sur `127.0.0.1`.
 - `keys.txt`, `role_id`, `secret_id` et `.env` sont exclus de Git.
 
 Limites (acceptables en labo, à traiter avant toute exposition) :
@@ -838,7 +878,7 @@ Limites (acceptables en labo, à traiter avant toute exposition) :
 - Les fichiers de secrets sont en `0444` dans le tmpfs.
 - `vault-init` conserve le root token en mémoire en permanence.
 - L’image `hashicorp/vault:1.13.3` est ancienne : prévoir une montée de version.
-- Les ports Traefik (`8088`), Prometheus (`9091`) et Grafana (`3004`) sont publiés sur toutes les interfaces ; les lier à `127.0.0.1` pour un usage local. Prometheus n’a pas d’authentification.
+- Les ports Traefik (`8088`) et Prometheus (`9091`) sont publiés sur toutes les interfaces ; les lier à `127.0.0.1` pour un usage local. Prometheus n’a pas d’authentification.
 - Le dashboard Traefik ne doit pas être publié sur Internet sans authentification.
 - cAdvisor tourne en mode `privileged` et Traefik a accès au socket Docker (même en lecture seule, cela donne une visibilité importante sur le moteur).
 - Les applications sont servies en HTTP local, sans TLS. Une exposition externe nécessite HTTPS, certificats, pare-feu, sauvegardes et une politique de mise à jour.
@@ -853,5 +893,18 @@ docker compose exec wordpress wp option update siteurl "http://wp.ynovm2.lab"
 
 ## 15. Actions à finaliser/corriger
 
-- ~~Fusion de docker-compose.yaml et docker-compose.monitoring.yml~~ (fait)
-- Faire disparaitre les secrets des containers applicatifs (actuellement visibles dans /run/vault) --> /dev/shm
+Fait :
+
+- ~~Fusion de docker-compose.yaml et docker-compose.monitoring.yml~~
+- ~~Mot de passe admin Grafana géré par Vault~~
+- ~~Grafana publié par Traefik sur `monitor.ynovm2.lab`~~
+- ~~Nom de projet Compose fixé (`name: ynovm2grp1dockerkube`)~~
+
+À faire :
+
+- Faire disparaître les secrets des conteneurs applicatifs (actuellement visibles dans `/run/vault`) → `/dev/shm`.
+- Lier les ports `8088` (Traefik) et `9091` (Prometheus) à `127.0.0.1`, ou les passer derrière Traefik avec authentification.
+- Rendre déclaratifs les réglages encore manuels :
+  - WordPress : `WORDPRESS_CONFIG_EXTRA` avec `WP_HOME` / `WP_SITEURL` ;
+  - Nextcloud : `TRUSTED_PROXIES` et `OVERWRITECLIURL`, adaptés au fonctionnement derrière Traefik.
+
