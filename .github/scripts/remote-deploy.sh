@@ -42,7 +42,7 @@ fi
 echo "Image WordPress déployée : $(grep '^WP_IMAGE_TAG=' .env)"
 
 # 3. Dossiers générés par vault-init (ignorés par Git, donc absents de l'archive)
-mkdir -p vault/init-out vault/approle
+#mkdir -p vault/init-out vault/approle
 
 # 4. Validation de la configuration
 docker compose config --quiet
