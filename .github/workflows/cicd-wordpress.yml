@@ -113,7 +113,7 @@ jobs:
       packages: read           # pull de l'image privée depuis le serveur
     env:
       IMAGE_TAG: ${{ needs.ci.outputs.image_tag }}
-      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/ynovm2grp1dockerkube' }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/home/ubuntu/ynovm2grp1dockerkube' }}
 
     steps:
       - name: Récupération du dépôt
