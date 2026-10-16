@@ -102,7 +102,7 @@ services:
       vault-agent-wordpress: { condition: service_healthy }
 
   wordpress:
-    image: ebynov/ynovm2dockerwp:1.2.1
+    image: ghcr.io/enzobarthelemy/ynovm2dockerwp:${WP_IMAGE_TAG:-latest}   # tag fixé par la CD dans le .env
     container_name: wordpress
     restart: unless-stopped
     depends_on:

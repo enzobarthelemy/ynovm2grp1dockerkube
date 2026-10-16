@@ -1,0 +1,209 @@
+name: CI/CD WordPress
+
+# ---------------------------------------------------------------------------
+# Déclencheur : chaque push (toutes branches).
+#   - CI (build + scan Trivy) sur toutes les branches.
+#   - Publication de l'image sur GHCR + CD (déploiement SSH) uniquement sur main.
+# ---------------------------------------------------------------------------
+on:
+  push:
+    branches: ["**"]
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+
+# Un seul déploiement à la fois par branche, sans annuler celui en cours.
+concurrency:
+  group: cicd-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # GitHub Container Registry (le nom doit être en minuscules)
+  IMAGE_NAME: ghcr.io/enzobarthelemy/ynovm2dockerwp
+  TRIVY_VERSION: "0.76.0"
+
+jobs:
+  # =========================================================================
+  # CI
+  # =========================================================================
+  ci:
+    name: CI - Build et scan de l'image WordPress
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write          # publication sur ghcr.io avec GITHUB_TOKEN
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - name: Récupération du dépôt
+        uses: actions/checkout@v6
+
+      - name: Calcul du tag de l'image
+        id: meta
+        run: |
+          TAG="sha-${GITHUB_SHA::7}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Image : ${IMAGE_NAME}:${TAG}"
+
+      - name: CI - Compilation de l'image (docker build)
+        run: |
+          docker build \
+            --pull \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.description=Image WordPress personnalisée ynovm2grp1dockerkube" \
+            --tag "${IMAGE_NAME}:${{ steps.meta.outputs.tag }}" \
+            customwp
+          docker image ls "${IMAGE_NAME}"
+
+      - name: CI - Scan avec Trivy (vulnérabilités HIGH/CRITICAL + secrets)
+        run: |
+          mkdir -p "${HOME}/.cache/trivy"
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${HOME}/.cache/trivy:/root/.cache/trivy" \
+            "aquasec/trivy:${TRIVY_VERSION}" image \
+              --scanners vuln,secret \
+              --severity HIGH,CRITICAL \
+              --ignore-unfixed \
+              --exit-code 1 \
+              --no-progress \
+              --format table \
+              "${IMAGE_NAME}:${{ steps.meta.outputs.tag }}" \
+            | tee trivy-report.txt
+
+      - name: Archivage du rapport Trivy
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report-${{ steps.meta.outputs.tag }}
+          path: trivy-report.txt
+          if-no-files-found: ignore
+
+      - name: CI - Connexion à GitHub Container Registry
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: CI - Publication de l'image sur ghcr.io (après un scan réussi)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          docker push "${IMAGE_NAME}:${{ steps.meta.outputs.tag }}"
+          docker tag  "${IMAGE_NAME}:${{ steps.meta.outputs.tag }}" "${IMAGE_NAME}:latest"
+          docker push "${IMAGE_NAME}:latest"
+
+  # =========================================================================
+  # CD
+  # =========================================================================
+  cd:
+    name: CD - Déploiement sur le serveur
+    needs: ci
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      packages: read           # pull de l'image privée depuis le serveur
+    env:
+      IMAGE_TAG: ${{ needs.ci.outputs.image_tag }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/ynovm2grp1dockerkube' }}
+
+    steps:
+      - name: Récupération du dépôt
+        uses: actions/checkout@v6
+
+      - name: CD - Connexion SSH avec clé SSH (Deploy Key)
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host deploy
+            HostName ${SSH_HOST}
+            User ${SSH_USER}
+            Port ${SSH_PORT}
+            IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            BatchMode yes
+            ConnectTimeout 15
+            ServerAliveInterval 30
+          EOF
+          chmod 600 ~/.ssh/config
+          ssh deploy 'echo "Connecté à $(hostname) en tant que $(whoami)"'
+
+      - name: CD - Vérification de l'installation de Docker
+        run: ssh deploy 'bash -s' < .github/scripts/remote-check-docker.sh
+
+      - name: CD - Connexion du serveur à ghcr.io (jeton temporaire du job)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Jeton transmis par stdin : il n'apparaît ni dans les logs ni dans
+          # la liste des processus du serveur. Il expire à la fin du job.
+          # shellcheck disable=SC2029
+          printf '%s' "$GHCR_TOKEN" | ssh deploy "docker login ghcr.io -u '${GITHUB_ACTOR}' --password-stdin"
+
+      - name: CD - Déploiement du docker-compose
+        env:
+          MARIADB_USER: ${{ vars.MARIADB_USER }}
+          MARIADB_DATABASE: ${{ vars.MARIADB_DATABASE }}
+          WORDPRESS_DB_NAME: ${{ vars.WORDPRESS_DB_NAME }}
+          WORDPRESS_DB_USER: ${{ vars.WORDPRESS_DB_USER }}
+        run: |
+          # Fichiers nécessaires à la stack (les secrets Vault déjà générés
+          # sur le serveur - vault/init-out, vault/approle - et le .env ne
+          # sont jamais écrasés : tar n'ajoute / ne remplace que ces fichiers).
+          # shellcheck disable=SC2029  # expansion côté runner volontaire
+          tar -czf - \
+              docker-compose.yaml \
+              prometheus.yml \
+              grafana \
+              vault/config vault/agent vault/init.sh \
+            | ssh deploy "mkdir -p '${DEPLOY_PATH}' && tar -xzf - -C '${DEPLOY_PATH}'"
+
+          REMOTE_ENV=$(printf 'DEPLOY_PATH=%q IMAGE_TAG=%q MARIADB_USER=%q MARIADB_DATABASE=%q WORDPRESS_DB_NAME=%q WORDPRESS_DB_USER=%q' \
+            "$DEPLOY_PATH" "$IMAGE_TAG" "$MARIADB_USER" "$MARIADB_DATABASE" "$WORDPRESS_DB_NAME" "$WORDPRESS_DB_USER")
+          # shellcheck disable=SC2029
+          ssh deploy "env ${REMOTE_ENV} bash -s" < .github/scripts/remote-deploy.sh
+
+      - name: CD - Vérification des healthchecks
+        run: |
+          REMOTE_ENV=$(printf 'DEPLOY_PATH=%q HEALTH_TIMEOUT=%q' "$DEPLOY_PATH" "300")
+          # shellcheck disable=SC2029
+          ssh deploy "env ${REMOTE_ENV} bash -s" < .github/scripts/remote-healthcheck.sh
+
+      - name: Résumé
+        if: always()
+        run: |
+          {
+            echo "### Déploiement WordPress"
+            echo ""
+            echo "| Élément | Valeur |"
+            echo "|---|---|"
+            echo "| Image | \`${IMAGE_NAME}:${IMAGE_TAG}\` |"
+            echo "| Commit | \`${GITHUB_SHA::7}\` |"
+            echo "| Dossier serveur | \`${DEPLOY_PATH}\` |"
+            echo "| Résultat | ${{ job.status }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Nettoyage (déconnexion ghcr.io du serveur, clé SSH)
+        if: always()
+        run: |
+          ssh deploy 'docker logout ghcr.io' || true
+          rm -f ~/.ssh/deploy_key ~/.ssh/config

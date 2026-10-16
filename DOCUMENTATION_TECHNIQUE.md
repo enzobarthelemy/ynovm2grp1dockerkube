@@ -39,6 +39,8 @@ vault/agent/nextcloud.hcl           configuration Vault Agent Nextcloud
 vault/agent/wordpress.hcl           configuration Vault Agent WordPress
 vault/agent/grafana.hcl             configuration Vault Agent Grafana
 customwp/                           sources de l’image WordPress personnalisée
+.github/workflows/cicd-wordpress.yml  pipeline CI/CD (build, scan, déploiement)
+.github/scripts/                    scripts exécutés sur le serveur par la CD
 SCAN.md                             résultats des scans Trivy
 .env.example                        modèle de fichier .env
 .gitattributes                      fins de ligne LF forcées
@@ -208,7 +210,7 @@ Nextcloud attend l’état sain de ce service avant son démarrage.
 |---|---|
 | Service | `wordpress` |
 | Conteneur | `wordpress` |
-| Image | `ebynov/ynovm2dockerwp:1.2.1` |
+| Image | `ghcr.io/enzobarthelemy/ynovm2dockerwp:${WP_IMAGE_TAG:-latest}` (voir section 15) |
 | Port interne | `8080` |
 | Domaine | `wp.ynovm2.lab` |
 | Réseaux | `net_ext`, `net_db` |
@@ -572,6 +574,7 @@ MARIADB_USER             utilisateur de la base Nextcloud (injecté dans Vault)
 MARIADB_DATABASE         nom de la base Nextcloud (injecté dans Vault)
 WORDPRESS_DB_NAME        nom de la base WordPress
 WORDPRESS_DB_USER        utilisateur de la base WordPress
+WP_IMAGE_TAG             tag de l’image WordPress (optionnel, `latest` par défaut, renseigné par la CD)
 ```
 
 Le `.env` n’est pas versionné (`.gitignore`). Le modèle partageable est `.env.example`, qui ne contient que des valeurs vides.
@@ -830,7 +833,7 @@ docker compose up -d
 
 ## 13. Image WordPress personnalisée
 
-Le dossier `customwp` contient le Dockerfile de l’image `ebynov/ynovm2dockerwp` :
+Le dossier `customwp` contient le Dockerfile de l’image `ghcr.io/enzobarthelemy/ynovm2dockerwp` (anciennement `ebynov/ynovm2dockerwp` sur Docker Hub) :
 
 - Base `wordpress:7.1.3-php8.3-apache`, avec `apt-get upgrade` des paquets système.
 - Extensions PHP `zip`, `intl` et Redis.
@@ -843,10 +846,10 @@ Le dossier `customwp` contient le Dockerfile de l’image `ebynov/ynovm2dockerwp
 Le Compose utilise l’image publiée :
 
 ```yaml
-image: ebynov/ynovm2dockerwp:1.2.1
+image: ghcr.io/enzobarthelemy/ynovm2dockerwp:${WP_IMAGE_TAG:-latest}
 ```
 
-Le Dockerfile n’est donc pas reconstruit par `docker compose up`.
+Le Dockerfile n’est pas reconstruit par `docker compose up` : l’image est construite, scannée et publiée par la CI (section 15), puis le tag est fixé dans le `.env` du serveur par la CD. Sans `WP_IMAGE_TAG`, le tag `latest` (dernière image publiée depuis `main`) est utilisé.
 
 Le dossier `wp-content/mu-plugins/` contient un fichier `.gitkeep` pour que Git le versionne : sans lui, le `COPY` du Dockerfile échoue lors d’une reconstruction depuis un clone.
 
@@ -891,7 +894,166 @@ docker compose exec wordpress wp option update home "http://wp.ynovm2.lab"
 docker compose exec wordpress wp option update siteurl "http://wp.ynovm2.lab"
 ```
 
-## 15. Actions à finaliser/corriger
+## 15. CI/CD (GitHub Actions)
+
+Le pipeline est défini dans `.github/workflows/cicd-wordpress.yml`. Il construit l’image WordPress personnalisée, la scanne, la publie sur GitHub Container Registry (`ghcr.io`), puis déploie la stack complète sur un serveur Linux par SSH.
+
+### 15.1 Vue d’ensemble
+
+```text
+git push
+   |
+   v
++------------------------------- CI (toutes les branches) ---------------------------+
+| checkout -> docker build customwp -> scan Trivy -> rapport en artefact               |
+|                                         |                                            |
+|                          (main uniquement, si scan OK)                               |
+|                                         v                                            |
+|         docker push ghcr.io/enzobarthelemy/ynovm2dockerwp:sha-<commit> + latest      |
++--------------------------------------------------------------------------------------+
+   |  (main uniquement)
+   v
++----------------------------------- CD (environnement production) ------------------+
+| connexion SSH (clé de déploiement) -> vérification Docker -> copie des fichiers      |
+| -> docker compose pull / up -> attente des healthchecks -> tests HTTP via Traefik    |
++--------------------------------------------------------------------------------------+
+```
+
+| Étape demandée | Implémentation |
+|---|---|
+| Déclencheur (Push) | `on: push` sur toutes les branches (fichiers `*.md` ignorés) + lancement manuel `workflow_dispatch` |
+| CI : compilation de l’image | `docker build --pull customwp`, tag `sha-<7 premiers caractères du commit>` |
+| CI : scan Trivy | Image officielle `aquasec/trivy:0.76.0`, vulnérabilités `HIGH`/`CRITICAL` corrigeables + secrets ; le pipeline échoue s’il en trouve |
+| CD : connexion SSH (Deploy Key) | Clé privée dans un secret GitHub, empreinte du serveur vérifiée (`StrictHostKeyChecking yes`) |
+| CD : vérification Docker | `.github/scripts/remote-check-docker.sh` |
+| CD : déploiement du compose | `.github/scripts/remote-deploy.sh` |
+| CD : vérification des healthchecks | `.github/scripts/remote-healthcheck.sh` |
+
+La publication sur `ghcr.io` et le déploiement ne s’exécutent que sur `main`. Sur les autres branches, le pipeline s’arrête après le scan : il sert de contrôle avant fusion.
+
+### 15.2 Détail des étapes
+
+**CI - Compilation.** L’image est construite depuis `customwp/` avec `--pull` (image de base toujours à jour) et les labels OCI `source` et `revision`, qui relient l’image au commit.
+
+**CI - Scan Trivy.** Options utilisées :
+
+```text
+--scanners vuln,secret   vulnérabilités des paquets + secrets oubliés dans l’image
+--severity HIGH,CRITICAL
+--ignore-unfixed         ne bloque pas sur les failles sans correctif disponible
+--exit-code 1            fait échouer le job si une faille est trouvée
+```
+
+Le rapport est conservé comme artefact du run (`trivy-report-sha-xxxxxxx`), même en cas d’échec. L’image n’est publiée que si le scan est propre.
+
+**CD - Connexion SSH.** Le runner écrit la clé privée et l’empreinte du serveur, puis crée un alias `deploy` dans `~/.ssh/config`. La clé est supprimée en fin de job, quel que soit le résultat.
+
+**CD - Vérification de Docker.** Le script contrôle sur le serveur :
+
+- la présence du client `docker` (installation via `get.docker.com` s’il manque et si `sudo` sans mot de passe est disponible) ;
+- la réponse du démon et l’accès de l’utilisateur au socket ;
+- la présence de Docker Compose v2, en version 2.17 minimum (requis pour `ps --format`).
+
+**CD - Déploiement.**
+
+1. Copie par `tar` sur SSH de `docker-compose.yaml`, `prometheus.yml`, `grafana/`, `vault/config`, `vault/agent` et `vault/init.sh` vers `DEPLOY_PATH`. Rien n’est supprimé : `vault/init-out`, `vault/approle` et le `.env` du serveur sont préservés.
+2. Création du `.env` au premier déploiement uniquement, à partir des variables GitHub. Il n’est jamais réécrit ensuite.
+3. Mise à jour de `WP_IMAGE_TAG` dans le `.env` avec le tag construit par la CI.
+4. `docker compose config`, puis `docker compose pull`.
+5. Recréation de `vault-init` s’il tourne déjà, pour rejouer `init.sh` (idempotent) et prendre en compte ses modifications.
+6. `docker compose up -d --remove-orphans`, puis suppression des images inutilisées.
+
+**CD - Healthchecks.** Pendant 300 secondes au maximum, le script attend que chacun des services du compose soit `running` et, s’il déclare un healthcheck, `healthy`. En cas d’échec, il affiche l’état de la stack et les 50 dernières lignes de log des conteneurs fautifs. Il interroge ensuite les applications à travers Traefik, avec l’en-tête `Host` (indépendant du DNS) :
+
+| Hôte | Chemin | Attendu |
+|---|---|---|
+| `wp.ynovm2.lab` | `/wp-login.php` | 2xx ou 3xx |
+| `cloud.ynovm2.lab` | `/status.php` | 2xx ou 3xx |
+| `monitor.ynovm2.lab` | `/api/health` | 2xx ou 3xx |
+
+Un résumé (image, commit, dossier, résultat) est ajouté à la page du run.
+
+### 15.3 Registre d’images : GitHub Container Registry
+
+L’image est publiée sur `ghcr.io/enzobarthelemy/ynovm2dockerwp`, avec deux tags :
+
+- `sha-<commit>` : immuable, utilisé par la CD ;
+- `latest` : dernière image publiée depuis `main`.
+
+L’authentification n’utilise aucun secret à créer :
+
+- La CI publie avec le `GITHUB_TOKEN` du run (permission `packages: write`).
+- La CD connecte le serveur à `ghcr.io` avec le `GITHUB_TOKEN` du job CD (permission `packages: read`), transmis par l’entrée standard. Elle fait `docker logout` en fin de job : le jeton expire de toute façon à la fin du run.
+- Le label `org.opencontainers.image.source` relie automatiquement le package au dépôt. C’est ce qui autorise le `GITHUB_TOKEN` à le lire et à l’écrire.
+
+Visibilité : un nouveau package GHCR est privé par défaut. Deux possibilités :
+
+- Le laisser privé : la CD fonctionne telle quelle. Pour un `docker compose pull` manuel (serveur ou poste local), se connecter avec un Personal Access Token ayant le droit `read:packages` :
+
+  ```powershell
+  docker login ghcr.io -u enzobarthelemy
+  ```
+
+- Le rendre public : sur GitHub, ouvrir **Profil → Packages → ynovm2dockerwp → Package settings → Change visibility**. Plus aucune connexion n’est alors nécessaire pour le pull.
+
+Au premier lancement, le tag `latest` n’existe qu’après le premier run réussi du pipeline sur `main`. Avant cela, un `docker compose up` local échoue sur l’image WordPress.
+
+### 15.4 Configuration GitHub
+
+Dans **Settings → Secrets and variables → Actions** :
+
+| Secret | Contenu |
+|---|---|
+| `SSH_HOST` | Adresse IP ou nom du serveur |
+| `SSH_USER` | Utilisateur de déploiement |
+| `SSH_PORT` | Port SSH (optionnel, `22` par défaut) |
+| `SSH_PRIVATE_KEY` | Clé privée de déploiement (contenu complet) |
+| `SSH_KNOWN_HOSTS` | Sortie de `ssh-keyscan -p <port> <serveur>` |
+
+| Variable | Contenu |
+|---|---|
+| `DEPLOY_PATH` | Dossier de déploiement (optionnel, `/opt/ynovm2grp1dockerkube` par défaut) |
+| `MARIADB_USER`, `MARIADB_DATABASE` | Utilisateur et base Nextcloud (premier déploiement) |
+| `WORDPRESS_DB_NAME`, `WORDPRESS_DB_USER` | Base et utilisateur WordPress (premier déploiement) |
+
+Le job CD utilise l’environnement GitHub `production` (créé automatiquement au premier run). On peut y ajouter une validation manuelle avant chaque déploiement (**Settings → Environments → production → Required reviewers**).
+
+### 15.5 Préparation du serveur
+
+Générer une paire de clés dédiée au déploiement (sur un poste d’admin) :
+
+```bash
+ssh-keygen -t ed25519 -C "github-actions-deploy" -f deploy_key -N ""
+```
+
+Sur le serveur :
+
+```bash
+sudo useradd -m -s /bin/bash deploy
+sudo usermod -aG docker deploy                 # si Docker est déjà installé
+sudo install -d -o deploy -g deploy /opt/ynovm2grp1dockerkube
+sudo -u deploy mkdir -p -m 700 /home/deploy/.ssh
+echo "<contenu de deploy_key.pub>" | sudo -u deploy tee -a /home/deploy/.ssh/authorized_keys
+sudo chmod 600 /home/deploy/.ssh/authorized_keys
+```
+
+Puis :
+
+- copier le contenu de `deploy_key` dans le secret `SSH_PRIVATE_KEY` et supprimer le fichier local ;
+- renseigner `SSH_KNOWN_HOSTS` avec `ssh-keyscan -p 22 <serveur>` ;
+- ouvrir le port `80` (et le port SSH) dans le pare-feu.
+
+Pour que la CD puisse installer Docker elle-même, l’utilisateur doit disposer de `sudo` sans mot de passe. Sinon, installer Docker à la main avant le premier run.
+
+Côté postes clients, les noms `*.ynovm2.lab` doivent pointer vers l’IP du serveur (fichier `hosts`, voir section 6) au lieu de `127.0.0.1`.
+
+### 15.6 Retour arrière et exploitation
+
+- Revenir à une version précédente : sur le serveur, remettre l’ancien tag dans le `.env` (`WP_IMAGE_TAG=sha-xxxxxxx`), puis lancer `docker compose up -d`. On peut aussi relancer un ancien run du workflow (**Re-run all jobs**).
+- Les tags `sha-<commit>` sont immuables. `latest` suit toujours la dernière image déployée depuis `main`.
+- Une faille HIGH/CRITICAL corrigeable bloque le pipeline : reconstruire suffit souvent, puisque le Dockerfile fait un `apt-get upgrade`. Sinon, mettre à jour l’image de base `wordpress:*`.
+
+## 16. Actions à finaliser/corriger
 
 Fait :
 
@@ -899,6 +1061,7 @@ Fait :
 - ~~Mot de passe admin Grafana géré par Vault~~
 - ~~Grafana publié par Traefik sur `monitor.ynovm2.lab`~~
 - ~~Nom de projet Compose fixé (`name: ynovm2grp1dockerkube`)~~
+- ~~Pipeline CI/CD GitHub Actions (build, scan Trivy, déploiement SSH, healthchecks)~~
 
 À faire :
 
