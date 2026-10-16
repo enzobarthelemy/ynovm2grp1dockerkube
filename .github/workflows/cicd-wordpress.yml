@@ -113,7 +113,7 @@ jobs:
       packages: read           # pull de l'image privée depuis le serveur
     env:
       IMAGE_TAG: ${{ needs.ci.outputs.image_tag }}
-      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/home/ubuntu/ynovm2grp1dockerkube' }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/ynovm2grp1dockerkube' }}
 
     steps:
       - name: Récupération du dépôt
@@ -131,6 +131,15 @@ jobs:
           # tr -d '\r' : supprime les fins de ligne Windows (CRLF) d'un copier-coller
           printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+
+          # Contrôle de la clé privée : lisible sans phrase de passe (obligatoire
+          # en CI) ; affiche l'empreinte de la clé publique à comparer avec
+          # celle présente dans ~/.ssh/authorized_keys sur le serveur.
+          if ! PUBKEY=$(ssh-keygen -y -P '' -f ~/.ssh/deploy_key 2>/dev/null); then
+            echo "::error::SSH_PRIVATE_KEY est invalide ou protégée par une phrase de passe (la CI ne peut pas la saisir)."
+            exit 1
+          fi
+          echo "Clé de déploiement utilisée : $(printf '%s\n' "$PUBKEY" | ssh-keygen -lf -)"
           printf '%s\n' "$SSH_KNOWN_HOSTS" | tr -d '\r' > ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
 
@@ -159,7 +168,10 @@ jobs:
             ServerAliveInterval 30
           EOF
           chmod 600 ~/.ssh/config
-          ssh deploy 'echo "Connecté à $(hostname) en tant que $(whoami)"'
+          if ! ssh deploy 'echo "Connecté à $(hostname) en tant que $(whoami)"'; then
+            echo "::error::Connexion SSH refusée. Vérifier sur le serveur que l'empreinte ci-dessus figure dans ~${SSH_USER}/.ssh/authorized_keys (ssh-keygen -lf ~/.ssh/authorized_keys), les droits (700 sur ~/.ssh, 600 sur authorized_keys) et les logs sshd (journalctl -u ssh)."
+            exit 1
+          fi
 
       - name: CD - Vérification de l'installation de Docker
         run: ssh deploy 'bash -s' < .github/scripts/remote-check-docker.sh
@@ -191,7 +203,10 @@ jobs:
               vault/config vault/agent vault/init.sh \
             | ssh deploy "mkdir -p '${DEPLOY_PATH}' && tar -xzf - -C '${DEPLOY_PATH}'"
 
-          REMOTE_ENV=$(printf 'DEPLOY_PATH=%q IMAGE_TAG=%q MARIADB_USER=%q MARIADB_DATABASE=%q WORDPRESS_DB_NAME=%q WORDPRESS_DB_USER=%q' \
+          # Préfixe CD_ : ces valeurs ne doivent servir qu'à créer le .env. Sous
+          # leur vrai nom, elles seraient prioritaires sur le .env pour
+          # docker compose et écraseraient la configuration du serveur.
+          REMOTE_ENV=$(printf 'DEPLOY_PATH=%q IMAGE_TAG=%q CD_MARIADB_USER=%q CD_MARIADB_DATABASE=%q CD_WORDPRESS_DB_NAME=%q CD_WORDPRESS_DB_USER=%q' \
             "$DEPLOY_PATH" "$IMAGE_TAG" "$MARIADB_USER" "$MARIADB_DATABASE" "$WORDPRESS_DB_NAME" "$WORDPRESS_DB_USER")
           # shellcheck disable=SC2029
           ssh deploy "env ${REMOTE_ENV} bash -s" < .github/scripts/remote-deploy.sh
