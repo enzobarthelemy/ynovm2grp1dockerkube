@@ -31,7 +31,7 @@ jobs:
   # =========================================================================
   ci:
     name: CI - Build et scan de l'image WordPress
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
       packages: write          # publication sur ghcr.io avec GITHUB_TOKEN
@@ -106,7 +106,7 @@ jobs:
     name: CD - Déploiement sur le serveur
     needs: ci
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     environment: production
     permissions:
       contents: read
