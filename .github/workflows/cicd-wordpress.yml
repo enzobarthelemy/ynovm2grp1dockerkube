@@ -1,9 +1,18 @@
 name: CI/CD WordPress
-
+ 
 # ---------------------------------------------------------------------------
 # Déclencheur : chaque push (toutes branches).
-#   - CI (build + scan Trivy) sur toutes les branches.
-#   - Publication de l'image sur GHCR + CD (déploiement SSH) uniquement sur main.
+#   - CI (build + scan Trivy) sur toutes les branches, runner GitHub hébergé.
+#   - Publication de l'image sur GHCR + CD uniquement sur main.
+#   - Le CD tourne sur un runner self-hosted installé SUR le serveur de
+#     déploiement : plus de SSH, les commandes s'exécutent localement.
+#
+# Prérequis sur le serveur (une seule fois) :
+#   - runner GitHub Actions installé en service (./svc.sh install && ./svc.sh start)
+#     avec les labels "self-hosted" et "linux" ;
+#   - l'utilisateur du runner est membre du groupe docker (sudo usermod -aG docker <user>,
+#     puis redémarrer le service du runner) ;
+#   - l'utilisateur du runner peut écrire dans DEPLOY_PATH.
 # ---------------------------------------------------------------------------
 on:
   push:
@@ -11,20 +20,20 @@ on:
     paths-ignore:
       - "**.md"
   workflow_dispatch:
-
+ 
 # Un seul déploiement à la fois par branche, sans annuler celui en cours.
 concurrency:
   group: cicd-${{ github.ref }}
   cancel-in-progress: false
-
+ 
 permissions:
   contents: read
-
+ 
 env:
   # GitHub Container Registry (le nom doit être en minuscules)
   IMAGE_NAME: ghcr.io/enzobarthelemy/ynovm2dockerwp
   TRIVY_VERSION: "0.76.0"
-
+ 
 jobs:
   # =========================================================================
   # CI
@@ -37,18 +46,18 @@ jobs:
       packages: write          # publication sur ghcr.io avec GITHUB_TOKEN
     outputs:
       image_tag: ${{ steps.meta.outputs.tag }}
-
+ 
     steps:
       - name: Récupération du dépôt
         uses: actions/checkout@v6
-
+ 
       - name: Calcul du tag de l'image
         id: meta
         run: |
           TAG="sha-${GITHUB_SHA::7}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Image : ${IMAGE_NAME}:${TAG}"
-
+ 
       - name: CI - Compilation de l'image (docker build)
         run: |
           docker build \
@@ -59,9 +68,10 @@ jobs:
             --tag "${IMAGE_NAME}:${{ steps.meta.outputs.tag }}" \
             customwp
           docker image ls "${IMAGE_NAME}"
-
+ 
       - name: CI - Scan avec Trivy (vulnérabilités HIGH/CRITICAL + secrets)
         run: |
+          set -o pipefail
           mkdir -p "${HOME}/.cache/trivy"
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
@@ -75,7 +85,7 @@ jobs:
               --format table \
               "${IMAGE_NAME}:${{ steps.meta.outputs.tag }}" \
             | tee trivy-report.txt
-
+ 
       - name: Archivage du rapport Trivy
         if: always()
         uses: actions/upload-artifact@v4
@@ -83,7 +93,7 @@ jobs:
           name: trivy-report-${{ steps.meta.outputs.tag }}
           path: trivy-report.txt
           if-no-files-found: ignore
-
+ 
       - name: CI - Connexion à GitHub Container Registry
         if: github.ref == 'refs/heads/main'
         uses: docker/login-action@v4
@@ -91,132 +101,94 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
+ 
       - name: CI - Publication de l'image sur ghcr.io (après un scan réussi)
         if: github.ref == 'refs/heads/main'
         run: |
           docker push "${IMAGE_NAME}:${{ steps.meta.outputs.tag }}"
           docker tag  "${IMAGE_NAME}:${{ steps.meta.outputs.tag }}" "${IMAGE_NAME}:latest"
           docker push "${IMAGE_NAME}:latest"
-
+ 
   # =========================================================================
-  # CD
+  # CD (runner self-hosted sur le serveur de déploiement)
   # =========================================================================
   cd:
-    name: CD - Déploiement sur le serveur
+    name: CD - Déploiement sur le serveur (self-hosted)
     needs: ci
     if: github.ref == 'refs/heads/main'
-    runs-on: self-hosted
+    runs-on: [self-hosted, linux]
     environment: production
+    timeout-minutes: 20
     permissions:
       contents: read
-      packages: read           # pull de l'image privée depuis le serveur
+      packages: read           # pull de l'image privée depuis ghcr.io
     env:
       IMAGE_TAG: ${{ needs.ci.outputs.image_tag }}
       DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/home/ubuntu/ynovm2grp1dockerkube' }}
-
+ 
     steps:
       - name: Récupération du dépôt
         uses: actions/checkout@v6
-
-      - name: CD - Connexion SSH avec clé SSH (Deploy Key)
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+        with:
+          clean: true
+ 
+      - name: CD - Contrôle de l'environnement du runner
         run: |
-          install -m 700 -d ~/.ssh
-          # tr -d '\r' : supprime les fins de ligne Windows (CRLF) d'un copier-coller
-          printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-
-          # Contrôle de la clé privée : lisible sans phrase de passe (obligatoire
-          # en CI) ; affiche l'empreinte de la clé publique à comparer avec
-          # celle présente dans ~/.ssh/authorized_keys sur le serveur.
-          if ! PUBKEY=$(ssh-keygen -y -P '' -f ~/.ssh/deploy_key 2>/dev/null); then
-            echo "::error::SSH_PRIVATE_KEY est invalide ou protégée par une phrase de passe (la CI ne peut pas la saisir)."
+          echo "Runner : $(hostname) - utilisateur $(whoami)"
+          if ! docker info >/dev/null 2>&1; then
+            echo "::error::L'utilisateur '$(whoami)' n'a pas accès au démon Docker. Ajouter l'utilisateur au groupe docker (sudo usermod -aG docker $(whoami)) puis redémarrer le service du runner."
             exit 1
           fi
-          echo "Clé de déploiement utilisée : $(printf '%s\n' "$PUBKEY" | ssh-keygen -lf -)"
-          printf '%s\n' "$SSH_KNOWN_HOSTS" | tr -d '\r' > ~/.ssh/known_hosts
-          chmod 644 ~/.ssh/known_hosts
-
-          # Contrôle : known_hosts doit contenir une entrée pour l'hôte EXACT
-          # utilisé par ssh (format "[hôte]:port" si le port n'est pas 22).
-          if [ "$SSH_PORT" = "22" ]; then LOOKUP="$SSH_HOST"; else LOOKUP="[$SSH_HOST]:$SSH_PORT"; fi
-          if ! ssh-keygen -F "$LOOKUP" -f ~/.ssh/known_hosts >/dev/null; then
-            echo "::error::SSH_KNOWN_HOSTS ne contient aucune ligne pour l'hôte '$LOOKUP' (doit correspondre exactement à SSH_HOST et au port)."
-            echo "Hôtes présents dans SSH_KNOWN_HOSTS :"
-            grep -v '^#' ~/.ssh/known_hosts | awk 'NF {print "  " $1 " (" $2 ")"}' || true
-            echo "Clés présentées par le serveur, vues depuis le runner :"
-            ssh-keyscan -p "$SSH_PORT" -T 10 "$SSH_HOST" 2>/dev/null | ssh-keygen -lf - || echo "  (serveur injoignable depuis le runner GitHub)"
+          mkdir -p "${DEPLOY_PATH}"
+          if [ ! -w "${DEPLOY_PATH}" ]; then
+            echo "::error::Le dossier ${DEPLOY_PATH} n'est pas accessible en écriture par '$(whoami)'."
             exit 1
           fi
-          ssh-keygen -l -F "$LOOKUP" -f ~/.ssh/known_hosts | grep -v '^#'
-          cat > ~/.ssh/config <<EOF
-          Host deploy
-            HostName ${SSH_HOST}
-            User ${SSH_USER}
-            Port ${SSH_PORT}
-            IdentityFile ~/.ssh/deploy_key
-            IdentitiesOnly yes
-            StrictHostKeyChecking yes
-            BatchMode yes
-            ConnectTimeout 15
-            ServerAliveInterval 30
-          EOF
-          chmod 600 ~/.ssh/config
-          if ! ssh deploy 'echo "Connecté à $(hostname) en tant que $(whoami)"'; then
-            echo "::error::Connexion SSH refusée. Vérifier sur le serveur que l'empreinte ci-dessus figure dans ~${SSH_USER}/.ssh/authorized_keys (ssh-keygen -lf ~/.ssh/authorized_keys), les droits (700 sur ~/.ssh, 600 sur authorized_keys) et les logs sshd (journalctl -u ssh)."
-            exit 1
-          fi
-
+ 
+          # Configuration Docker isolée et propre au job : les identifiants
+          # ghcr.io ne sont jamais écrits dans ~/.docker du runner.
+          DOCKER_CONFIG_DIR="${RUNNER_TEMP}/docker-config-${GITHUB_RUN_ID}"
+          install -m 700 -d "${DOCKER_CONFIG_DIR}"
+          echo "DOCKER_CONFIG=${DOCKER_CONFIG_DIR}" >> "$GITHUB_ENV"
+ 
       - name: CD - Vérification de l'installation de Docker
-        run: ssh deploy 'bash -s' < .github/scripts/remote-check-docker.sh
-
-      - name: CD - Connexion du serveur à ghcr.io (jeton temporaire du job)
+        run: bash .github/scripts/remote-check-docker.sh
+ 
+      - name: CD - Connexion à ghcr.io (jeton temporaire du job)
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Jeton transmis par stdin : il n'apparaît ni dans les logs ni dans
-          # la liste des processus du serveur. Il expire à la fin du job.
-          # shellcheck disable=SC2029
-          printf '%s' "$GHCR_TOKEN" | ssh deploy "docker login ghcr.io -u '${GITHUB_ACTOR}' --password-stdin"
-
+          # Jeton transmis par stdin, stocké uniquement dans DOCKER_CONFIG
+          # (dossier temporaire du job). Il expire à la fin du job.
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+ 
       - name: CD - Déploiement du docker-compose
         env:
-          MARIADB_USER: ${{ vars.MARIADB_USER }}
-          MARIADB_DATABASE: ${{ vars.MARIADB_DATABASE }}
-          WORDPRESS_DB_NAME: ${{ vars.WORDPRESS_DB_NAME }}
-          WORDPRESS_DB_USER: ${{ vars.WORDPRESS_DB_USER }}
+          CD_MARIADB_USER: ${{ vars.MARIADB_USER }}
+          CD_MARIADB_DATABASE: ${{ vars.MARIADB_DATABASE }}
+          CD_WORDPRESS_DB_NAME: ${{ vars.WORDPRESS_DB_NAME }}
+          CD_WORDPRESS_DB_USER: ${{ vars.WORDPRESS_DB_USER }}
         run: |
-          # Fichiers nécessaires à la stack (les secrets Vault déjà générés
-          # sur le serveur - vault/init-out, vault/approle - et le .env ne
-          # sont jamais écrasés : tar n'ajoute / ne remplace que ces fichiers).
-          # shellcheck disable=SC2029  # expansion côté runner volontaire
-          tar -czf - \
+          # Copie des fichiers de la stack dans DEPLOY_PATH. Les secrets Vault
+          # déjà générés (vault/init-out, vault/approle) et le .env ne sont
+          # jamais écrasés : tar n'ajoute / ne remplace que ces fichiers.
+          tar -cf - \
               docker-compose.yaml \
               prometheus.yml \
               grafana \
               vault/config vault/agent vault/init.sh \
-            | ssh deploy "mkdir -p '${DEPLOY_PATH}' && tar -xzf - -C '${DEPLOY_PATH}'"
-
-          # Préfixe CD_ : ces valeurs ne doivent servir qu'à créer le .env. Sous
-          # leur vrai nom, elles seraient prioritaires sur le .env pour
-          # docker compose et écraseraient la configuration du serveur.
-          REMOTE_ENV=$(printf 'DEPLOY_PATH=%q IMAGE_TAG=%q CD_MARIADB_USER=%q CD_MARIADB_DATABASE=%q CD_WORDPRESS_DB_NAME=%q CD_WORDPRESS_DB_USER=%q' \
-            "$DEPLOY_PATH" "$IMAGE_TAG" "$MARIADB_USER" "$MARIADB_DATABASE" "$WORDPRESS_DB_NAME" "$WORDPRESS_DB_USER")
-          # shellcheck disable=SC2029
-          ssh deploy "env ${REMOTE_ENV} bash -s" < .github/scripts/remote-deploy.sh
-
+            | tar -xf - -C "${DEPLOY_PATH}"
+ 
+          # Préfixe CD_ : ces valeurs ne servent qu'à créer le .env. Sous leur
+          # vrai nom, elles seraient prioritaires sur le .env pour docker
+          # compose et écraseraient la configuration du serveur.
+          bash .github/scripts/remote-deploy.sh
+ 
       - name: CD - Vérification des healthchecks
-        run: |
-          REMOTE_ENV=$(printf 'DEPLOY_PATH=%q HEALTH_TIMEOUT=%q' "$DEPLOY_PATH" "300")
-          # shellcheck disable=SC2029
-          ssh deploy "env ${REMOTE_ENV} bash -s" < .github/scripts/remote-healthcheck.sh
-
+        env:
+          HEALTH_TIMEOUT: "300"
+        run: bash .github/scripts/remote-healthcheck.sh
+ 
       - name: Résumé
         if: always()
         run: |
@@ -227,12 +199,17 @@ jobs:
             echo "|---|---|"
             echo "| Image | \`${IMAGE_NAME}:${IMAGE_TAG}\` |"
             echo "| Commit | \`${GITHUB_SHA::7}\` |"
+            echo "| Serveur | \`$(hostname)\` |"
             echo "| Dossier serveur | \`${DEPLOY_PATH}\` |"
             echo "| Résultat | ${{ job.status }} |"
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Nettoyage (déconnexion ghcr.io du serveur, clé SSH)
+ 
+      - name: Nettoyage (déconnexion ghcr.io, configuration Docker temporaire)
         if: always()
         run: |
-          ssh deploy 'docker logout ghcr.io' || true
-          rm -f ~/.ssh/deploy_key ~/.ssh/config
+          if [ -n "${DOCKER_CONFIG:-}" ]; then
+            docker logout ghcr.io || true
+            rm -rf "${DOCKER_CONFIG}"
+          fi
+          # Images WordPress obsolètes (garde celles utilisées par les conteneurs)
+          docker image prune -f --filter "label=org.opencontainers.image.description=Image WordPress personnalisée ynovm2grp1dockerkube" || true
