@@ -31,7 +31,7 @@ jobs:
   # =========================================================================
   ci:
     name: CI - Build et scan de l'image WordPress
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write          # publication sur ghcr.io avec GITHUB_TOKEN
