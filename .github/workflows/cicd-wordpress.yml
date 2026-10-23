@@ -1,5 +1,5 @@
 name: CI/CD WordPress
- 
+
 # ---------------------------------------------------------------------------
 # Déclencheur : chaque push (toutes branches).
 #   - CI (build + scan Trivy) sur toutes les branches, runner GitHub hébergé.
@@ -20,20 +20,20 @@ on:
     paths-ignore:
       - "**.md"
   workflow_dispatch:
- 
+
 # Un seul déploiement à la fois par branche, sans annuler celui en cours.
 concurrency:
   group: cicd-${{ github.ref }}
   cancel-in-progress: false
- 
+
 permissions:
   contents: read
- 
+
 env:
   # GitHub Container Registry (le nom doit être en minuscules)
   IMAGE_NAME: ghcr.io/enzobarthelemy/ynovm2dockerwp
   TRIVY_VERSION: "0.76.0"
- 
+
 jobs:
   # =========================================================================
   # CI
@@ -46,18 +46,18 @@ jobs:
       packages: write          # publication sur ghcr.io avec GITHUB_TOKEN
     outputs:
       image_tag: ${{ steps.meta.outputs.tag }}
- 
+
     steps:
       - name: Récupération du dépôt
         uses: actions/checkout@v6
- 
+
       - name: Calcul du tag de l'image
         id: meta
         run: |
           TAG="sha-${GITHUB_SHA::7}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Image : ${IMAGE_NAME}:${TAG}"
- 
+
       - name: CI - Compilation de l'image (docker build)
         run: |
           docker build \
@@ -68,7 +68,7 @@ jobs:
             --tag "${IMAGE_NAME}:${{ steps.meta.outputs.tag }}" \
             customwp
           docker image ls "${IMAGE_NAME}"
- 
+
       - name: CI - Scan avec Trivy (vulnérabilités HIGH/CRITICAL + secrets)
         run: |
           set -o pipefail
@@ -85,7 +85,7 @@ jobs:
               --format table \
               "${IMAGE_NAME}:${{ steps.meta.outputs.tag }}" \
             | tee trivy-report.txt
- 
+
       - name: Archivage du rapport Trivy
         if: always()
         uses: actions/upload-artifact@v4
@@ -93,7 +93,7 @@ jobs:
           name: trivy-report-${{ steps.meta.outputs.tag }}
           path: trivy-report.txt
           if-no-files-found: ignore
- 
+
       - name: CI - Connexion à GitHub Container Registry
         if: github.ref == 'refs/heads/main'
         uses: docker/login-action@v4
@@ -101,14 +101,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
- 
+
       - name: CI - Publication de l'image sur ghcr.io (après un scan réussi)
         if: github.ref == 'refs/heads/main'
         run: |
           docker push "${IMAGE_NAME}:${{ steps.meta.outputs.tag }}"
           docker tag  "${IMAGE_NAME}:${{ steps.meta.outputs.tag }}" "${IMAGE_NAME}:latest"
           docker push "${IMAGE_NAME}:latest"
- 
+
   # =========================================================================
   # CD (runner self-hosted sur le serveur de déploiement)
   # =========================================================================
@@ -125,13 +125,13 @@ jobs:
     env:
       IMAGE_TAG: ${{ needs.ci.outputs.image_tag }}
       DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/home/ubuntu/ynovm2grp1dockerkube' }}
- 
+
     steps:
       - name: Récupération du dépôt
         uses: actions/checkout@v6
         with:
           clean: true
- 
+
       - name: CD - Contrôle de l'environnement du runner
         run: |
           echo "Runner : $(hostname) - utilisateur $(whoami)"
@@ -144,16 +144,16 @@ jobs:
             echo "::error::Le dossier ${DEPLOY_PATH} n'est pas accessible en écriture par '$(whoami)'."
             exit 1
           fi
- 
+
           # Configuration Docker isolée et propre au job : les identifiants
           # ghcr.io ne sont jamais écrits dans ~/.docker du runner.
           DOCKER_CONFIG_DIR="${RUNNER_TEMP}/docker-config-${GITHUB_RUN_ID}"
           install -m 700 -d "${DOCKER_CONFIG_DIR}"
           echo "DOCKER_CONFIG=${DOCKER_CONFIG_DIR}" >> "$GITHUB_ENV"
- 
+
       - name: CD - Vérification de l'installation de Docker
         run: bash .github/scripts/remote-check-docker.sh
- 
+
       - name: CD - Connexion à ghcr.io (jeton temporaire du job)
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -161,7 +161,7 @@ jobs:
           # Jeton transmis par stdin, stocké uniquement dans DOCKER_CONFIG
           # (dossier temporaire du job). Il expire à la fin du job.
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
- 
+
       - name: CD - Déploiement du docker-compose
         env:
           CD_MARIADB_USER: ${{ vars.MARIADB_USER }}
@@ -178,17 +178,17 @@ jobs:
               grafana \
               vault/config vault/agent vault/init.sh \
             | tar -xf - -C "${DEPLOY_PATH}"
- 
+
           # Préfixe CD_ : ces valeurs ne servent qu'à créer le .env. Sous leur
           # vrai nom, elles seraient prioritaires sur le .env pour docker
           # compose et écraseraient la configuration du serveur.
           bash .github/scripts/remote-deploy.sh
- 
+
       - name: CD - Vérification des healthchecks
         env:
           HEALTH_TIMEOUT: "300"
         run: bash .github/scripts/remote-healthcheck.sh
- 
+
       - name: Résumé
         if: always()
         run: |
@@ -203,7 +203,7 @@ jobs:
             echo "| Dossier serveur | \`${DEPLOY_PATH}\` |"
             echo "| Résultat | ${{ job.status }} |"
           } >> "$GITHUB_STEP_SUMMARY"
- 
+
       - name: Nettoyage (déconnexion ghcr.io, configuration Docker temporaire)
         if: always()
         run: |
