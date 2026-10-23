@@ -124,7 +124,9 @@ jobs:
       packages: read           # pull de l'image privée depuis ghcr.io
     env:
       IMAGE_TAG: ${{ needs.ci.outputs.image_tag }}
-      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/home/ubuntu/ynovm2grp1dockerkube' }}
+      # Optionnel : variable de dépôt DEPLOY_PATH pour forcer un autre dossier.
+      # Par défaut : ~/ynovm2grp1dockerkube de l'utilisateur qui exécute le runner.
+      DEPLOY_PATH_OVERRIDE: ${{ vars.DEPLOY_PATH }}
 
     steps:
       - name: Récupération du dépôt
@@ -134,7 +136,14 @@ jobs:
 
       - name: CD - Contrôle de l'environnement du runner
         run: |
-          echo "Runner : $(hostname) - utilisateur $(whoami)"
+          echo "Runner : $(hostname) - utilisateur $(whoami) - HOME=${HOME}"
+
+          # Dossier de déploiement : variable DEPLOY_PATH si définie, sinon le
+          # home de l'utilisateur du runner. Exporté pour les étapes suivantes.
+          DEPLOY_PATH="${DEPLOY_PATH_OVERRIDE:-${HOME}/ynovm2grp1dockerkube}"
+          echo "DEPLOY_PATH=${DEPLOY_PATH}" >> "$GITHUB_ENV"
+          echo "Dossier de déploiement : ${DEPLOY_PATH}"
+
           if ! docker info >/dev/null 2>&1; then
             echo "::error::L'utilisateur '$(whoami)' n'a pas accès au démon Docker. Ajouter l'utilisateur au groupe docker (sudo usermod -aG docker $(whoami)) puis redémarrer le service du runner."
             exit 1
