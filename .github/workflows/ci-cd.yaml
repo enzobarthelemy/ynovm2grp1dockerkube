@@ -1,0 +1,71 @@
+name: CI/CD WordPress (Kubernetes)
+
+# À chaque push sur main qui touche l'image ou le dossier kube/ :
+#   1. build : construit l'image WordPress, la scanne, la pousse sur ghcr.io
+#   2. deploy : sur le runner du lab, déploie ce tag dans k3s
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker/customwp/**"
+      - "kube/**"
+      - ".github/workflows/ci-cd.yaml"
+  workflow_dispatch:
+
+concurrency:              # un seul déploiement à la fois
+  group: deploy-k3s
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ghcr.io/enzobarthelemy/ynovm2dockerwp
+
+jobs:
+  # ---------------------------------------------------------------- 1. BUILD
+  build:
+    runs-on: ubuntu-latest            # runner GitHub, rien à installer
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Tag de l'image (sha du commit)
+        id: tag
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: docker build --pull -t "$IMAGE_NAME:${{ steps.tag.outputs.tag }}" docker/customwp
+
+      - name: Scan Trivy (bloque si faille HIGH/CRITICAL corrigeable)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.76.0 image --severity HIGH,CRITICAL --ignore-unfixed \
+            --exit-code 1 --no-progress "$IMAGE_NAME:${{ steps.tag.outputs.tag }}"
+
+      - name: Push sur ghcr.io
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE_NAME:${{ steps.tag.outputs.tag }}"
+          docker tag  "$IMAGE_NAME:${{ steps.tag.outputs.tag }}" "$IMAGE_NAME:latest"
+          docker push "$IMAGE_NAME:latest"
+
+  # --------------------------------------------------------------- 2. DEPLOY
+  deploy:
+    needs: build
+    runs-on: [self-hosted, linux]     # le runner installé sur ton lab k3s
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Déploiement
+        working-directory: kube
+        env:
+          WP_IMAGE_TAG: ${{ needs.build.outputs.tag }}   # lu par helmfile.yaml.gotmpl
+        run: helmfile apply
+
+      - name: Vérification
+        run: |
+          kubectl -n wordpress rollout status deploy/wordpress --timeout=300s
+          kubectl -n wordpress get deploy wordpress \
+            -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
