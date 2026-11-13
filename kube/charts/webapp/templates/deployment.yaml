@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate     # volume RWO : on arrête l'ancien pod avant de lancer le nouveau
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Release.Name }}
+      annotations:
+        {{- include "vault.annotations" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.waitFor }}
+      # = depends_on : le conteneur principal ne démarre qu'une fois la base joignable
+      initContainers:
+        - name: wait-db
+          image: busybox:1.37
+          command: ["sh", "-c", "until nc -z -w2 {{ .host }} {{ .port }}; do echo 'attente de {{ .host }}'; sleep 3; done"]
+      {{- end }}
+      containers:
+        - name: app
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            {{- range $k, $v := .Values.env }}
+            - { name: {{ $k }}, value: {{ $v | quote }} }
+            {{- end }}
+          ports:
+            - { name: http, containerPort: {{ .Values.containerPort }} }
+          startupProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 10
+            failureThreshold: {{ .Values.startupFailureThreshold }}
+          readinessProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: {{ .Values.persistence.mountPath }} }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-data

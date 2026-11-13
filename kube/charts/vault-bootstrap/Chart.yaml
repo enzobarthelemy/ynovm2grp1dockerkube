@@ -1,0 +1,4 @@
+apiVersion: v2
+name: vault-bootstrap
+description: Initialise, déverrouille et configure Vault (remplace vault-init/init.sh)
+version: 0.1.0

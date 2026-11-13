@@ -1,0 +1,15 @@
+# Demande de volume persistant (ex-volume *_data du compose)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-data
+  annotations:
+    helm.sh/resource-policy: keep   # un `helm uninstall` ne supprime pas les données
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.persistence.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}

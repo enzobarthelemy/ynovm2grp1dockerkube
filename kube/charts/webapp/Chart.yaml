@@ -1,0 +1,4 @@
+apiVersion: v2
+name: webapp
+description: Application web générique (déployée 2 fois - wordpress et nextcloud)
+version: 0.1.0

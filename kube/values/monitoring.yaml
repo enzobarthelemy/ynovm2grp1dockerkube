@@ -1,0 +1,68 @@
+# Chart kube-prometheus-stack : Prometheus Operator + Prometheus + Grafana
+# + node-exporter + kube-state-metrics. cAdvisor est déjà dans le kubelet.
+
+alertmanager:
+  enabled: false          # absent du compose
+
+# Sur k3s ces composants sont intégrés au binaire k3s et ne sont pas
+# scrapables séparément : on les désactive pour éviter des cibles en erreur.
+kubeControllerManager: { enabled: false }
+kubeScheduler:         { enabled: false }
+kubeProxy:             { enabled: false }
+kubeEtcd:              { enabled: false }
+
+prometheus:
+  prometheusSpec:
+    retention: 7d
+    # L'opérateur laisse 600 s d'arrêt à Prometheus ; Longhorn n'efface un pod bloqué
+    # sur un nœud mort qu'après ce délai -> ~16 min de bascule. 60 s suffisent ici.
+    terminationGracePeriodSeconds: 60
+    tolerations:
+      - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+      - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+    storageSpec:          # ex-volume prometheus_data
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 5Gi
+
+grafana:
+  # Par défaut Kubernetes attend 300 s avant de recréer ailleurs un pod dont le nœud
+  # ne répond plus. Les volumes étant répliqués (Longhorn), on repart après 30 s.
+  tolerations:
+    - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+    - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+  serviceAccount:
+    create: true
+    name: grafana         # nom attendu par le rôle Vault "grafana"
+
+  # Injection du mot de passe admin depuis Vault -> /vault/secrets/admin_password
+  podAnnotations:
+    vault.hashicorp.com/agent-inject: "true"
+    vault.hashicorp.com/agent-pre-populate-only: "true"
+    vault.hashicorp.com/role: "grafana"
+    vault.hashicorp.com/auth-max-backoff: "5s"
+    vault.hashicorp.com/agent-inject-secret-admin_password: "secret/data/grafana/admin"
+    vault.hashicorp.com/agent-inject-template-admin_password: |
+      {{- with secret "secret/data/grafana/admin" -}}{{ .Data.data.admin_password }}{{- end -}}
+
+  # Avec ces deux variables, le chart ne génère pas son propre Secret admin
+  env:
+    GF_SECURITY_ADMIN_USER: admin
+    # Image Grafana distroless (chart récent) : *__FILE n'est plus supporté,
+    # on passe par l'expansion de variables de Grafana $__file{}
+    GF_SECURITY_ADMIN_PASSWORD: "$__file{/vault/secrets/admin_password}"
+    GF_SERVER_DOMAIN: monitor.appart.cbarreda.fr
+    GF_SERVER_ROOT_URL: https://monitor.appart.cbarreda.fr:8443/
+
+  persistence:            # ex-volume grafana_data
+    enabled: true
+    size: 1Gi
+
+  ingress:                # ex-labels traefik
+    enabled: true
+    ingressClassName: traefik
+    hosts: [monitor.appart.cbarreda.fr]
+    path: /

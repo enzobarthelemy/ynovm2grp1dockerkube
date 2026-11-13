@@ -1,0 +1,66 @@
+# StatefulSet : pour les applis avec état (identité et volume stables)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  serviceName: {{ .Release.Name }}
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Release.Name }}
+      annotations:
+        {{- include "vault.annotations" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: mariadb
+          image: {{ .Values.image }}
+          env:
+            {{- range $k, $v := .Values.env }}
+            - { name: {{ $k }}, value: {{ $v | quote }} }
+            {{- end }}
+          ports:
+            - { name: mysql, containerPort: 3306 }
+          # = le healthcheck du compose. Tant qu'il échoue, le pod est retiré du Service.
+          readinessProbe:
+            exec:
+              command: ["healthcheck.sh", "--connect", "--innodb_initialized"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          # S'il échoue durablement, Kubernetes redémarre le conteneur (= restart: always)
+          livenessProbe:
+            exec:
+              command: ["healthcheck.sh", "--connect"]
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/mysql }
+  # Un PVC créé automatiquement par pod (ex-volume *_db_data)
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.storage.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.size }}

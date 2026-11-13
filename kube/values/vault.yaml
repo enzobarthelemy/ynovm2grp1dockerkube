@@ -1,0 +1,34 @@
+# Chart officiel hashicorp/vault
+injector:
+  enabled: true          # webhook qui ajoute l'agent Vault dans les pods annotés
+  replicas: 2            # webhook absent = pods créés SANS leurs secrets : on le double
+
+server:
+  # Par défaut Kubernetes attend 300 s avant de recréer ailleurs un pod dont le nœud
+  # ne répond plus. Les volumes étant répliqués (Longhorn), on repart après 30 s.
+  tolerations:
+    - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+    - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+  standalone:
+    enabled: true        # 1 seul serveur, stockage fichier (comme dans le compose)
+    config: |
+      ui = true
+      listener "tcp" {
+        address         = "[::]:8200"
+        cluster_address = "[::]:8201"
+        tls_disable     = 1
+      }
+      storage "file" {
+        path = "/vault/data"
+      }
+  dataStorage:
+    enabled: true        # PVC (StorageClass local-path de k3s) = ex-volume vault_data
+    size: 1Gi
+  # Par défaut, un Vault scellé est "NotReady" -> helm --wait bloquerait.
+  # On le considère prêt même scellé/non initialisé : c'est le bootstrap qui s'en charge.
+  readinessProbe:
+    enabled: true
+    path: "/v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204"
+
+ui:
+  enabled: true

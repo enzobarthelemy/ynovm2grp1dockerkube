@@ -1,0 +1,73 @@
+# =============================================================================
+# Point d'entrée unique : `helmfile apply` déploie toute la stack, dans l'ordre.
+# Chaque "release" = une installation Helm (un chart + des valeurs) dans un namespace.
+# `needs` impose l'ordre ; `wait` attend que chaque release soit prête avant la suivante.
+# =============================================================================
+
+repositories:
+  - name: hashicorp
+    url: https://helm.releases.hashicorp.com
+  - name: prometheus-community
+    url: https://prometheus-community.github.io/helm-charts
+
+helmDefaults:
+  wait: true            # attend que les pods soient Ready
+  waitForJobs: true     # attend la fin des Jobs (bootstrap Vault)
+  timeout: 900
+  createNamespace: true # crée les namespaces s'ils n'existent pas
+
+releases:
+
+  # --- 1. Vault : serveur + injecteur de secrets --------------------------------
+  - name: vault
+    namespace: vault
+    chart: hashicorp/vault
+    # version: "x.y.z"    # à figer après `helm search repo hashicorp/vault`
+    values: [values/vault.yaml]
+
+  # --- 2. Initialisation de Vault (remplace vault-init + init.sh) ---------------
+  - name: vault-bootstrap
+    namespace: vault
+    chart: ./charts/vault-bootstrap
+    values: [values/vault-bootstrap.yaml]
+    needs: [vault/vault]
+
+  # --- 3. Supervision (remplace cadvisor + prometheus + grafana) ----------------
+  - name: monitoring
+    namespace: monitoring
+    chart: prometheus-community/kube-prometheus-stack
+    # version: "x.y.z"
+    values: [values/monitoring.yaml]
+    needs: [vault/vault-bootstrap]
+    # Le chart installe lui-même ses CRD (Prometheus, ServiceMonitor...) : sur un
+    # cluster vierge, le `helm diff` d'apply échoue car ces types n'existent pas encore.
+    disableValidationOnInstall: true
+
+  # --- 4. WordPress -------------------------------------------------------------
+  - name: wordpress-db
+    namespace: wordpress
+    chart: ./charts/mariadb
+    values: [values/wordpress-db.yaml]
+    needs: [vault/vault-bootstrap]
+
+  - name: wordpress
+    namespace: wordpress
+    chart: ./charts/webapp
+    values: [values/wordpress.yaml]
+    needs: [wordpress/wordpress-db]
+    set:
+      - name: image.tag   # équivalent de ${WP_IMAGE_TAG:-latest} : fixé par la CD
+        value: {{ env "WP_IMAGE_TAG" | default "latest" | quote }}
+
+  # --- 5. Nextcloud -------------------------------------------------------------
+  - name: nextcloud-db
+    namespace: nextcloud
+    chart: ./charts/mariadb
+    values: [values/nextcloud-db.yaml]
+    needs: [vault/vault-bootstrap]
+
+  - name: nextcloud
+    namespace: nextcloud
+    chart: ./charts/webapp
+    values: [values/nextcloud.yaml]
+    needs: [nextcloud/nextcloud-db]

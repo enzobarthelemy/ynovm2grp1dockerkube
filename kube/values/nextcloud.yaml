@@ -1,0 +1,32 @@
+image:
+  repository: nextcloud
+  tag: 32.0.15-apache
+
+containerPort: 80
+
+vault:
+  role: nextcloud
+  secretPath: secret/data/nextcloud/db
+  keys: [db_name, db_user, db_password]
+
+waitFor:
+  host: nextcloud-db
+  port: 3306
+
+env:
+  MYSQL_HOST: nextcloud-db
+  MYSQL_DATABASE_FILE: /vault/secrets/db_name
+  MYSQL_USER_FILE: /vault/secrets/db_user
+  MYSQL_PASSWORD_FILE: /vault/secrets/db_password
+  NEXTCLOUD_TRUSTED_DOMAINS: cloud.appart.cbarreda.fr
+  TRUSTED_PROXIES: 10.42.0.0/16   # réseau des pods k3s (Traefik)
+
+persistence:              # ex-volume nextcloud_data
+  size: 10Gi
+  mountPath: /var/www/html
+
+# Le 1er démarrage copie les sources de Nextcloud dans le volume : c'est long
+startupFailureThreshold: 60
+
+ingress:
+  host: cloud.appart.cbarreda.fr

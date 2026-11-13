@@ -1,0 +1,30 @@
+# Le Job a le droit de créer / lire le Secret contenant les clés de Vault, rien d'autre.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-bootstrap
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vault-bootstrap
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [{{ .Values.keysSecretName | quote }}]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vault-bootstrap
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vault-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: vault-bootstrap

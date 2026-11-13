@@ -1,0 +1,25 @@
+image:
+  repository: ""
+  tag: latest
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+containerPort: 80
+vault: {}              # role, secretPath, keys
+waitFor: {}            # host, port : attend la base avant de démarrer
+env: {}
+persistence:
+  size: 2Gi
+  mountPath: /var/www/html
+  storageClassName: ""
+startupFailureThreshold: 30   # x10s laissées au 1er démarrage
+ingress:
+  className: traefik   # Traefik intégré à k3s
+  host: ""
+resources:
+  requests: { cpu: 50m, memory: 128Mi }
+podSecurityContext: {}   # ex : { fsGroup: 33 } si l'image tourne sans root
+# Par défaut Kubernetes attend 300 s avant de recréer ailleurs un pod dont le nœud
+# ne répond plus. Les volumes étant répliqués (Longhorn), on repart après 30 s.
+tolerations:
+  - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+  - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }

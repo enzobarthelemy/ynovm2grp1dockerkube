@@ -1,0 +1,20 @@
+image: mariadb:lts-ubi10
+vault: {}          # role, secretPath, keys
+env: {}
+storage:
+  size: 2Gi
+  storageClassName: ""   # vide = StorageClass par défaut (local-path sur k3s)
+allowFrom: []      # valeurs du label app.kubernetes.io/name autorisées sur le port 3306
+resources:
+  requests: { cpu: 50m, memory: 256Mi }
+# L'image tourne en utilisateur mysql (uid/gid 999). fsGroup donne le volume à ce
+# groupe au montage : indispensable sur un volume neuf appartenant à root (Longhorn) ;
+# local-path créait des dossiers 0777 et masquait le problème.
+podSecurityContext:
+  fsGroup: 999
+  fsGroupChangePolicy: OnRootMismatch
+# Par défaut Kubernetes attend 300 s avant de recréer ailleurs un pod dont le nœud
+# ne répond plus. Les volumes étant répliqués (Longhorn), on repart après 30 s.
+tolerations:
+  - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+  - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }

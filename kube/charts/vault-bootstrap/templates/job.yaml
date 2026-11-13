@@ -1,0 +1,26 @@
+# Hook Helm : exécuté après chaque install/upgrade de la release, une fois Vault démarré.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vault-bootstrap
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      serviceAccountName: vault-bootstrap
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: {{ .Values.image }}
+          command: ["/bin/sh", "/config/bootstrap.sh"]
+          env:
+            - { name: VAULT_ADDR,  value: {{ .Values.vaultAddr | quote }} }
+            - { name: KEYS_SECRET, value: {{ .Values.keysSecretName | quote }} }
+          volumeMounts:
+            - { name: config, mountPath: /config }
+      volumes:
+        - name: config
+          configMap: { name: vault-bootstrap }

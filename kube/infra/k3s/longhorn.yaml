@@ -1,0 +1,27 @@
+# /var/lib/rancher/k3s/server/manifests/longhorn.yaml (k8s-01)
+# Volumes répliqués en 3 copies (une par nœud) ; StorageClass par défaut à la place de local-path.
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: longhorn
+  namespace: kube-system
+spec:
+  repo: https://charts.longhorn.io
+  chart: longhorn
+  version: 1.13.0
+  targetNamespace: longhorn-system
+  createNamespace: true
+  valuesContent: |-
+    persistence:
+      defaultClass: true
+      defaultClassReplicaCount: 3
+    defaultSettings:
+      # supprime de force les pods restés sur un nœud mort pour libérer leurs volumes
+      nodeDownPodDeletionPolicy: delete-both-statefulset-and-deployment-pod
+    csi:
+      attacherReplicaCount: 2
+      provisionerReplicaCount: 2
+      resizerReplicaCount: 2
+      snapshotterReplicaCount: 2
+    longhornUI:
+      replicas: 1

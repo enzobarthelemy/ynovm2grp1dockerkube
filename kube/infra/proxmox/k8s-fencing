@@ -1,0 +1,70 @@
+#!/bin/bash
+# k8s-fencing : clôture (fencing) automatique des nœuds k3s, exécutée sur pve01.
+#
+# Quand un nœud est NotReady ET que Proxmox confirme que sa VM est arrêtée, on pose
+# le taint officiel node.kubernetes.io/out-of-service : Kubernetes supprime alors
+# tout de suite les pods du nœud et détache leurs volumes (sinon : 5 + 6 min).
+# Quand le nœud redevient Ready, on retire le taint.
+# Une VM encore allumée n'est jamais clôturée : ce peut être une coupure réseau,
+# et deux copies d'une base écrivant le même volume serait pire qu'une panne.
+#
+# pve01 ne joint pas l'API (VLAN 199 isolé) : on passe par l'agent invité d'un
+# nœud vivant (qm guest exec).
+
+VMS="110 111 112"          # k8s-01, k8s-02, k8s-03 (nom = k8s-0<id - 109>)
+GRACE=10                   # secondes de NotReady avant d'agir (la détection en prend déjà ~40)
+INTERVAL=10
+TAINT=node.kubernetes.io/out-of-service
+STATE=/run/k8s-fencing
+mkdir -p "$STATE"
+
+log() { echo "$*"; }
+
+# Exécute k3s kubectl via le premier nœud allumé dont l'agent répond.
+kube() {
+  local id
+  for id in $VMS; do
+    qm status "$id" 2>/dev/null | grep -q "status: running" || continue
+    qm agent "$id" ping >/dev/null 2>&1 || continue
+    qm guest exec "$id" --timeout 20 -- k3s kubectl "$@" 2>/dev/null | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+sys.stdout.write(d.get("out-data") or "")
+sys.exit(d.get("exitcode") or 0)' && return 0
+  done
+  return 1
+}
+
+while true; do
+  nodes=$(kube get nodes -o 'jsonpath={range .items[*]}{.metadata.name} {.status.conditions[?(@.type=="Ready")].status} {.spec.taints[*].key}{"\n"}{end}')
+  if [ -n "$nodes" ]; then
+    while read -r name ready taints; do
+      [ -n "$name" ] || continue
+      id=$((109 + ${name##*-0}))
+      if [ "$ready" = True ]; then
+        rm -f "$STATE/$name"
+        if [[ " $taints " == *" $TAINT "* ]]; then
+          kube taint node "$name" "$TAINT"- >/dev/null && log "$name de nouveau Ready : taint out-of-service retiré"
+        fi
+        continue
+      fi
+      [ -f "$STATE/$name" ] || date +%s > "$STATE/$name"
+      since=$(( $(date +%s) - $(cat "$STATE/$name") ))
+      [[ " $taints " == *" $TAINT "* ]] && continue
+      [ "$since" -ge "$GRACE" ] || continue
+      if qm status "$id" 2>/dev/null | grep -q "status: stopped"; then
+        kube taint node "$name" "$TAINT=nodeshutdown:NoExecute" >/dev/null \
+          && log "$name NotReady depuis ${since}s et VM $id arrêtée (qm status) : taint out-of-service posé"
+      elif [ ! -f "$STATE/$name.warned" ]; then
+        log "$name NotReady mais la VM $id tourne encore : pas de clôture (coupure réseau possible)"
+        touch "$STATE/$name.warned"
+      fi
+    done <<< "$nodes"
+  fi
+  # remet à zéro l'avertissement « VM allumée » quand le nœud revient
+  for f in "$STATE"/*.warned; do [ -e "$f" ] || continue; n=$(basename "$f" .warned); [ -f "$STATE/$n" ] || rm -f "$f"; done
+  sleep "$INTERVAL"
+done

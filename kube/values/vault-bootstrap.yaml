@@ -1,0 +1,34 @@
+# Ce que le Job d'init crée dans Vault, pour chaque application :
+#   - un secret KV v2 : secret/<secretPath>
+#   - une policy "<name>" : lecture seule sur ce secret
+#   - un rôle d'auth Kubernetes "<name>" : réservé aux ServiceAccounts listés,
+#     dans le namespace indiqué (remplace les AppRole du compose)
+# `static`    : valeurs fixes (écrasent l'existant)
+# `generated` : mots de passe aléatoires, générés une seule fois (conservés ensuite)
+apps:
+  - name: wordpress
+    namespace: wordpress
+    serviceAccounts: [wordpress, wordpress-db]
+    secretPath: wordpress/db
+    static:
+      db_name: wordpress
+      db_user: wordpress
+    generated: [db_password, db_root_password]
+
+  - name: nextcloud
+    namespace: nextcloud
+    serviceAccounts: [nextcloud, nextcloud-db]
+    secretPath: nextcloud/db
+    static:
+      db_name: nextcloud
+      db_user: nextcloud
+    generated: [db_password, db_root_password]
+
+  - name: grafana
+    namespace: monitoring
+    serviceAccounts: [grafana]
+    secretPath: grafana/admin
+    generated: [admin_password]
+
+# Namespaces autorisés à joindre Vault (NetworkPolicy, ex-réseau net_vault)
+allowedNamespaces: [vault, wordpress, nextcloud, monitoring]

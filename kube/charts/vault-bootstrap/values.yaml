@@ -1,0 +1,10 @@
+vaultAddr: http://vault.vault.svc:8200
+image: alpine:3.20             # curl + jq installés au démarrage
+keysSecretName: vault-unseal-keys
+apps: []
+allowedNamespaces: []
+# Par défaut Kubernetes attend 300 s avant de recréer ailleurs un pod dont le nœud
+# ne répond plus. Les volumes étant répliqués (Longhorn), on repart après 30 s.
+tolerations:
+  - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }
+  - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30 }

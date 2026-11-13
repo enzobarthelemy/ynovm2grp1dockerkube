@@ -1,0 +1,4 @@
+apiVersion: v2
+name: mariadb
+description: MariaDB réutilisable (déployé 2 fois - wordpress-db et nextcloud-db)
+version: 0.1.0

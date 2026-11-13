@@ -1,0 +1,11 @@
+# Nom DNS stable "<release>" (ex : wordpress-db:3306), comme le nom de service compose
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  clusterIP: None        # service "headless", requis par le StatefulSet
+  selector:
+    app.kubernetes.io/name: {{ .Release.Name }}
+  ports:
+    - { name: mysql, port: 3306, targetPort: 3306 }

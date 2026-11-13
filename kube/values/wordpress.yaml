@@ -1,0 +1,33 @@
+image:
+  repository: ghcr.io/enzobarthelemy/ynovm2dockerwp
+  tag: latest             # surchargé par WP_IMAGE_TAG dans le helmfile
+# imagePullSecrets: [{ name: ghcr-creds }]   # si l'image ghcr est privée
+
+containerPort: 8080
+
+vault:
+  role: wordpress
+  secretPath: secret/data/wordpress/db
+  keys: [db_name, db_user, db_password]
+
+waitFor:                  # ex-depends_on: condition: service_healthy
+  host: wordpress-db
+  port: 3306
+
+env:
+  WORDPRESS_DB_HOST: wordpress-db:3306
+  WORDPRESS_DB_NAME_FILE: /vault/secrets/db_name
+  WORDPRESS_DB_USER_FILE: /vault/secrets/db_user
+  WORDPRESS_DB_PASSWORD_FILE: /vault/secrets/db_password
+
+persistence:              # ex-volume wordpress_data
+  size: 2Gi
+  mountPath: /var/www/html
+
+# L'image tourne en www-data (uid/gid 33) : le volume doit appartenir à ce groupe
+podSecurityContext:
+  fsGroup: 33
+  fsGroupChangePolicy: OnRootMismatch
+
+ingress:
+  host: wp.appart.cbarreda.fr

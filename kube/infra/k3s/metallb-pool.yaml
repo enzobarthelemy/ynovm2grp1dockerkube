@@ -1,0 +1,17 @@
+# kubectl apply -f metallb-pool.yaml (une fois MetalLB démarré)
+# Mode L2 : le nœud qui porte une IP répond aux requêtes ARP pour elle.
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: vlan199
+  namespace: metallb-system
+spec:
+  addresses: [10.1.199.100-10.1.199.109]
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: vlan199
+  namespace: metallb-system
+spec:
+  ipAddressPools: [vlan199]

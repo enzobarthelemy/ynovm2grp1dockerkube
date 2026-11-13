@@ -1,0 +1,15 @@
+vault:
+  role: nextcloud
+  secretPath: secret/data/nextcloud/db
+  keys: [db_root_password, db_name, db_user, db_password]
+
+env:
+  MARIADB_ROOT_PASSWORD_FILE: /vault/secrets/db_root_password
+  MARIADB_DATABASE_FILE: /vault/secrets/db_name
+  MARIADB_USER_FILE: /vault/secrets/db_user
+  MARIADB_PASSWORD_FILE: /vault/secrets/db_password
+
+storage:
+  size: 2Gi
+
+allowFrom: [nextcloud]    # seuls les pods Nextcloud joignent la base (ex-net_db)

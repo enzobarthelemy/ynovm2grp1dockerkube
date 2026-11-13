@@ -1,0 +1,12 @@
+[Unit]
+Description=Clôture automatique des nœuds k3s (taint out-of-service quand la VM est arrêtée)
+After=pve-guests.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/k8s-fencing
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
