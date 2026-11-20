@@ -1,0 +1,30 @@
+#cloud-config
+# Snippet cloud-init (vendor-data) des nœuds k3s, à placer dans /var/lib/vz/snippets/.
+# Appliqué au premier démarrage de chaque VM : elle sort prête pour k3s et Longhorn.
+# (Le disque, agrandi à 64 Go avant le premier démarrage, est étendu par cloud-init.)
+packages:
+  - qemu-guest-agent   # Proxmox lance ses commandes par l'agent (le VLAN 199 ne joint pas le LAN)
+  - open-iscsi         # Longhorn présente ses volumes en iSCSI
+write_files:
+  # Configuration de k3s, lue par l'installeur : MetalLB remplace le répartiteur
+  # intégré (servicelb), Longhorn remplace le stockage local (local-path).
+  - path: /etc/rancher/k3s/config.yaml
+    content: |
+      disable:
+        - servicelb
+        - local-storage
+  - path: /etc/modules-load.d/longhorn.conf
+    content: |
+      iscsi_tcp
+  # multipathd (actif sur Ubuntu) s'empare sinon des disques iSCSI de Longhorn
+  - path: /etc/multipath.conf
+    append: true
+    content: |
+      blacklist {
+          devnode "^sd[a-z0-9]+"
+      }
+runcmd:
+  - [systemctl, enable, --now, qemu-guest-agent]
+  - [modprobe, iscsi_tcp]
+  - [systemctl, enable, --now, iscsid]
+  - [systemctl, restart, multipathd]

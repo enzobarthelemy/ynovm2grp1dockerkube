@@ -1,0 +1,15 @@
+# Volumes répliqués en 3 copies (une par nœud) ; StorageClass par défaut
+# (local-path est désactivé dans la configuration de k3s).
+persistence:
+  defaultClass: true
+  defaultClassReplicaCount: 3
+defaultSettings:
+  # supprime de force les pods restés sur un nœud mort pour libérer leurs volumes
+  nodeDownPodDeletionPolicy: delete-both-statefulset-and-deployment-pod
+csi:
+  attacherReplicaCount: 2
+  provisionerReplicaCount: 2
+  resizerReplicaCount: 2
+  snapshotterReplicaCount: 2
+longhornUI:
+  replicas: 1

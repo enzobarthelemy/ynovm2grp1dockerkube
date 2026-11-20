@@ -1,10 +1,17 @@
 # =============================================================================
-# Point d'entrée unique : `helmfile apply` déploie toute la stack, dans l'ordre.
+# Point d'entrée unique : `helmfile apply` déploie toute la stack, dans l'ordre,
+# sur un k3s nu (créé par infra/proxmox/construire-cluster.sh) : réseau, stockage,
+# secrets, supervision, applications.
 # Chaque "release" = une installation Helm (un chart + des valeurs) dans un namespace.
 # `needs` impose l'ordre ; `wait` attend que chaque release soit prête avant la suivante.
+# Toutes les versions de charts sont figées : une mise à jour se fait par un commit.
 # =============================================================================
 
 repositories:
+  - name: metallb
+    url: https://metallb.github.io/metallb
+  - name: longhorn
+    url: https://charts.longhorn.io
   - name: hashicorp
     url: https://helm.releases.hashicorp.com
   - name: prometheus-community
@@ -18,12 +25,35 @@ helmDefaults:
 
 releases:
 
+  # --- 0. Socle du cluster : IP virtuelle et stockage répliqué ------------------
+  - name: metallb
+    namespace: metallb-system
+    chart: metallb/metallb
+    version: 0.16.2
+
+  # Pool d'IP de MetalLB + réglages de Traefik (fourni par k3s)
+  - name: reseau
+    namespace: kube-system
+    chart: ./charts/reseau
+    needs: [metallb-system/metallb]
+    # IPAddressPool est un type créé par MetalLB : au premier `helm diff` il
+    # n'existe pas encore et la validation échouerait.
+    disableValidationOnInstall: true
+
+  - name: longhorn
+    namespace: longhorn-system
+    chart: longhorn/longhorn
+    version: 1.13.0
+    values: [values/longhorn.yaml]
+    disableValidationOnInstall: true
+
   # --- 1. Vault : serveur + injecteur de secrets --------------------------------
   - name: vault
     namespace: vault
     chart: hashicorp/vault
-    # version: "x.y.z"    # à figer après `helm search repo hashicorp/vault`
+    version: 0.34.1
     values: [values/vault.yaml]
+    needs: [longhorn-system/longhorn]     # son volume est un volume Longhorn
 
   # --- 2. Initialisation de Vault (remplace vault-init + init.sh) ---------------
   - name: vault-bootstrap
@@ -36,7 +66,7 @@ releases:
   - name: monitoring
     namespace: monitoring
     chart: prometheus-community/kube-prometheus-stack
-    # version: "x.y.z"
+    version: 93.5.0
     values: [values/monitoring.yaml]
     needs: [vault/vault-bootstrap]
     # Le chart installe lui-même ses CRD (Prometheus, ServiceMonitor...) : sur un

@@ -1,0 +1,5 @@
+# Plage d'IP que MetalLB peut attribuer (VLAN 199, hors des IP des nœuds)
+pool: [10.1.199.100-10.1.199.109]
+# IP fixe de Traefik : cible des redirections de ports 8080/8443 de la passerelle
+traefikIP: 10.1.199.100
+traefikReplicas: 3

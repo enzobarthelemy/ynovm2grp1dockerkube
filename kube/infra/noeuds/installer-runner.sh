@@ -3,8 +3,11 @@
 # (job « deploy » de .github/workflows/ci-cd.yaml : helmfile apply dans kube/).
 # Un runner par nœud : si l'un tombe, GitHub confie le job à un autre ; le workflow
 # n'autorise qu'un déploiement à la fois (concurrency: deploy-k3s).
-# Prérequis : jeton d'enregistrement du dépôt (valable 1 h, généré par un admin du dépôt)
-# dans /root/.runner-token ; le fichier est supprimé à la fin.
+# Prérequis, l'un des deux (supprimé à la fin) :
+#   - /root/.runner-registration.tgz : enregistrement d'un runner existant (.runner,
+#     .credentials, .credentials_rsaparams), sauvé par infra/proxmox/sauver-runners
+#     avant une reconstruction des VM. Le runner garde son identité, sans jeton ;
+#   - /root/.runner-token : jeton d'enregistrement (valable 1 h, généré par un admin du dépôt).
 set -euo pipefail
 REPO=https://github.com/enzobarthelemy/ynovm2grp1dockerkube
 RUNNER=2.338.2
@@ -13,7 +16,7 @@ HELM=v3.22.1 HELMFILE=1.8.2 HELMDIFF=3.15.15
 U=github-runner
 D=/opt/actions-runner
 W=$(mktemp -d)
-trap 'rm -rf "$W" /root/.runner-token' EXIT
+trap 'rm -rf "$W" /root/.runner-token /root/.runner-registration.tgz' EXIT
 cd "$W"
 
 # 1. helm et helmfile s'ils manquent (sommes SHA-256 vérifiées)
@@ -54,9 +57,22 @@ curl -fsSLo runner.tar.gz "https://github.com/actions/runner/releases/download/v
 echo "$RUNNER_SHA  runner.tar.gz" | sha256sum -c --quiet
 tar xzf runner.tar.gz && rm runner.tar.gz
 ./bin/installdependencies.sh >/dev/null 2>&1
-chown -R "$U:$U" "$D"
-sudo -u "$U" -H ./config.sh --unattended --url "$REPO" --token "$(cat /root/.runner-token)" \
-  --name "$(hostname)" --labels k3s --work _work --replace >/dev/null
+if [ -f /root/.runner-registration.tgz ]; then
+  tar xzf /root/.runner-registration.tgz -C "$D"      # identité reprise telle quelle
+  chown -R "$U:$U" "$D"
+  # ce que config.sh aurait écrit : .env, .path et svc.sh, le modèle du paquet
+  # complété du nom de service (actions.runner.<propriétaire>-<dépôt>.<runner>.service)
+  sudo -u "$U" -H ./env.sh >/dev/null
+  NOM=$(python3 -c 'import json; r = json.load(open(".runner", encoding="utf-8-sig"))
+print(r["gitHubUrl"].rstrip("/").split("github.com/")[1].replace("/", "-") + "." + r["agentName"])')
+  sed -e "s/{{SvcNameVar}}/actions.runner.$NOM.service/" -e "s/{{SvcDescription}}/GitHub Actions Runner ($NOM)/" \
+    bin/systemd.svc.sh.template > svc.sh
+  chmod 755 svc.sh && chown "$U:$U" svc.sh
+else
+  chown -R "$U:$U" "$D"
+  sudo -u "$U" -H ./config.sh --unattended --url "$REPO" --token "$(cat /root/.runner-token)" \
+    --name "$(hostname)" --labels k3s --work _work --replace >/dev/null
+fi
 echo "KUBECONFIG=/home/$U/.kube/config" >> .env   # lu par le service au démarrage
 ./svc.sh install "$U" >/dev/null
 ./svc.sh start >/dev/null

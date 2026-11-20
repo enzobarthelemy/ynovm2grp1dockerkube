@@ -1,0 +1,23 @@
+#!/bin/bash
+# Sur l'hôte Proxmox, AVANT de détruire les VM : sauve l'enregistrement GitHub de chaque
+# runner (.runner, .credentials et sa clé privée .credentials_rsaparams) dans /root/k8s-runners/.
+# construire-cluster.sh les remet en place : les runners gardent leur identité et il
+# n'est pas besoin de redemander un jeton d'enregistrement à un admin du dépôt.
+# Ces fichiers donnent accès au dépôt en tant que runner : dossier 700, fichiers 600.
+set -euo pipefail
+umask 077
+D=/root/k8s-runners
+install -d -m 700 "$D"
+for id in 110 111 112; do
+  n=k8s-0$((id - 109))
+  qm guest exec "$id" --timeout 30 -- bash -c \
+    'cd /opt/actions-runner && tar czf - .runner .credentials .credentials_rsaparams $(ls -A | grep -x .runner_migrated) | base64 -w0' \
+    | python3 -c '
+import sys, json, base64
+d = json.load(sys.stdin)
+if d.get("exitcode"):
+    sys.exit("échec : " + (d.get("err-data") or ""))
+sys.stdout.buffer.write(base64.b64decode(d["out-data"]))' > "$D/$n.tgz.part"
+  mv "$D/$n.tgz.part" "$D/$n.tgz"
+  echo "$n : $(tar tzf "$D/$n.tgz" | tr '\n' ' ')"
+done

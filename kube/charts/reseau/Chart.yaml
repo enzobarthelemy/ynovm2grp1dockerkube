@@ -1,0 +1,4 @@
+apiVersion: v2
+name: reseau
+description: IP virtuelle du cluster (pool MetalLB) et réglages du Traefik fourni par k3s
+version: 0.1.0

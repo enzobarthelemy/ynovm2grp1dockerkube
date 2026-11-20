@@ -1,5 +1,5 @@
-# /var/lib/rancher/k3s/server/manifests/traefik-config.yaml : surcharge du Traefik fourni par k3s.
-# 3 copies, une par nœud, et l'IP virtuelle fixe 10.1.199.100 (cible des redirections de ports).
+# Surcharge du Traefik installé par k3s (HelmChartConfig, mécanisme prévu par k3s) :
+# une copie par nœud et l'IP virtuelle fixe.
 apiVersion: helm.cattle.io/v1
 kind: HelmChartConfig
 metadata:
@@ -8,7 +8,7 @@ metadata:
 spec:
   valuesContent: |-
     deployment:
-      replicas: 3
+      replicas: {{ .Values.traefikReplicas }}
     topologySpreadConstraints:
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname
@@ -18,4 +18,4 @@ spec:
             app.kubernetes.io/name: traefik
     service:
       annotations:
-        metallb.io/loadBalancerIPs: 10.1.199.100
+        metallb.io/loadBalancerIPs: {{ .Values.traefikIP }}

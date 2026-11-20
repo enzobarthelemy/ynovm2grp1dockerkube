@@ -1,6 +1,6 @@
 # Stack ynovm2 sur k3s
 
-Ce dépôt déploie WordPress, Nextcloud, Vault et une supervision Prometheus/Grafana sur un cluster k3s de trois VM Proxmox. Une seule commande installe les applications (`helmfile apply`) ; le dossier `infra/` contient tout ce qu'il faut en dessous : création des VM, k3s, MetalLB, Traefik, Longhorn et le script de clôture des nœuds.
+Ce dépôt déploie WordPress, Nextcloud, Vault et une supervision Prometheus/Grafana sur un cluster k3s de trois VM Proxmox. Un script lancé sur l'hôte crée les VM et installe k3s ([`infra/proxmox/construire-cluster.sh`](infra/proxmox/construire-cluster.sh)). Tout le reste, du réseau et du stockage jusqu'aux applications, est déployé par une seule commande (`helmfile apply`), que le CD lance à chaque push sur `main`.
 
 Le README suit l'ordre du montage : l'infrastructure, le cluster, le stockage, les applications, puis les pannes qu'on a provoquées pour vérifier la haute disponibilité et ce qu'on a réglé après chaque essai.
 
@@ -40,7 +40,7 @@ Tout tourne sur un seul serveur Proxmox VE (i5-12400, 31 Go de RAM, SSD NVMe de 
 | k8s-02 | 111 | 10.1.199.111 | 2 | 4 Go | 64 Go |
 | k8s-03 | 112 | 10.1.199.112 | 2 | 4 Go | 64 Go |
 
-Les VM partent de l'image cloud Ubuntu 24.04 (sans interface graphique), configurée par cloud-init : IP fixe (pas de DHCP sur ce VLAN), passerelle 10.1.199.254, DNS 1.1.1.1. Aucune clé SSH ni mot de passe n'est injecté ; chacun pose le sien avec `qm guest passwd <id> ubuntu`. Le snippet [`infra/proxmox/qga.yaml`](infra/proxmox/qga.yaml) installe l'agent invité QEMU.
+Les VM partent de l'image cloud Ubuntu 24.04 (sans interface graphique), configurée par cloud-init : IP fixe (pas de DHCP sur ce VLAN), passerelle 10.1.199.254, DNS 1.1.1.1. Aucune clé SSH ni mot de passe n'est injecté ; chacun pose le sien avec `qm guest passwd <id> ubuntu`. Le snippet [`infra/proxmox/noeud-k8s.yaml`](infra/proxmox/noeud-k8s.yaml) (vendor-data cloud-init) installe l'agent invité QEMU, prépare les nœuds pour Longhorn (section 3) et écrit la configuration de k3s.
 
 On avait commencé avec 2 Go de RAM et 32 Go de disque. Après k3s, etcd et Traefik, il restait environ 1 Go libre par nœud, alors que la stack en demandait 2 à 2,5 Go de plus : on est passé à 4 Go. Les disques sont passés à 64 Go pour Longhorn, qui garde 3 copies de 23 Go de volumes demandés (le pool LVM est en thin provisioning, l'espace n'est consommé qu'à l'écriture).
 
@@ -60,26 +60,25 @@ Trois pièges nous ont coûté du temps :
 
 Les trois nœuds sont des serveurs k3s avec etcd intégré. etcd garde le quorum à 2 sur 3 : le cluster survit à la perte d'un nœud. Aucun nœud ne porte de taint, chacun fait aussi tourner les applications.
 
-```bash
-# jeton commun, généré une fois et copié dans /root/.k3s-token (mode 600) sur les 3 nœuds
-openssl rand -hex 32
+[`infra/proxmox/construire-cluster.sh`](infra/proxmox/construire-cluster.sh), lancé sur l'hôte, fait l'installation. Il génère un jeton commun, le dépose dans `/root/.k3s-token` (mode 600) sur chaque nœud, puis lance l'installeur de k3s : d'abord sur k8s-01, qui crée le cluster, ensuite sur k8s-02 et k8s-03, l'un après l'autre (etcd n'accepte qu'un nouveau membre à la fois).
 
+```bash
 # k8s-01
-curl -sfL https://get.k3s.io | K3S_TOKEN_FILE=/root/.k3s-token \
+curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.37.2+k3s1 K3S_TOKEN_FILE=/root/.k3s-token \
   INSTALL_K3S_EXEC="server --cluster-init --node-ip 10.1.199.110 --write-kubeconfig-mode 600" sh -
 
 # k8s-02 et k8s-03 (node-ip .111 / .112)
-curl -sfL https://get.k3s.io | K3S_TOKEN_FILE=/root/.k3s-token \
-  INSTALL_K3S_EXEC="server --server https://10.1.199.110:6443 --node-ip 10.1.199.111" sh -
+curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.37.2+k3s1 K3S_TOKEN_FILE=/root/.k3s-token \
+  INSTALL_K3S_EXEC="server --server https://10.1.199.110:6443 --node-ip 10.1.199.111 --write-kubeconfig-mode 600" sh -
 ```
 
-Version : k3s v1.37.2+k3s1.
+La configuration de k3s (`/etc/rancher/k3s/config.yaml`, écrite par cloud-init) désactive deux composants fournis par défaut : le répartiteur `servicelb`, remplacé par MetalLB, et le stockage `local-path`, remplacé par Longhorn. Le cluster sort de là nu, avec k3s, CoreDNS et Traefik ; `helmfile apply` installe tout le reste.
 
 ### IP virtuelle : MetalLB et Traefik
 
-k3s fournit un répartiteur (servicelb) qui publie les services sur l'IP de chaque nœud. Il fallait une adresse unique à viser depuis la passerelle, qui survive à la perte d'un nœud. On a désactivé servicelb ([`infra/k3s/config.yaml`](infra/k3s/config.yaml)) et installé MetalLB 0.16.2 en mode L2 ([`metallb.yaml`](infra/k3s/metallb.yaml), [`metallb-pool.yaml`](infra/k3s/metallb-pool.yaml)) : un nœud répond aux requêtes ARP pour l'IP, un autre reprend s'il tombe.
+k3s fournit un répartiteur (servicelb) qui publie les services sur l'IP de chaque nœud. Il fallait une adresse unique à viser depuis la passerelle, qui survive à la perte d'un nœud. On a désactivé servicelb et installé MetalLB 0.16.2 en mode L2 (release `metallb`, pool d'adresses dans [`charts/reseau`](charts/reseau/templates/metallb-pool.yaml)) : un nœud répond aux requêtes ARP pour l'IP, un autre reprend s'il tombe.
 
-Le Traefik de k3s (3.7.15) est surchargé par [`traefik-config.yaml`](infra/k3s/traefik-config.yaml) : IP fixe 10.1.199.100, trois copies réparties sur les trois nœuds. Avec une seule copie, notre premier test de panne a échoué : elle tournait sur le nœud coupé. En coupant le nœud qui porte l'IP, le site revient en 5 s environ.
+Le Traefik de k3s (3.7.15) est surchargé par un HelmChartConfig, le mécanisme prévu par k3s ([`traefik-config.yaml`](charts/reseau/templates/traefik-config.yaml), dans le même chart) : IP fixe 10.1.199.100, trois copies réparties sur les trois nœuds. Avec une seule copie, notre premier test de panne a échoué : elle tournait sur le nœud coupé. En coupant le nœud qui porte l'IP, le site revient en 5 s environ.
 
 Pour savoir quel nœud porte l'IP : `kubectl get servicel2statuses.metallb.io -A`.
 
@@ -87,9 +86,9 @@ Pour savoir quel nœud porte l'IP : `kubectl get servicel2statuses.metallb.io -A
 
 Au départ, les volumes utilisaient `local-path`, le stockage par défaut de k3s : un simple dossier sur le disque d'un nœud. Si ce nœud tombe, l'application et sa base restent arrêtées jusqu'à son retour, puisque les données n'existent nulle part ailleurs.
 
-Longhorn 1.13.0 ([`infra/k3s/longhorn.yaml`](infra/k3s/longhorn.yaml)) garde chaque volume en trois copies, une par nœud. Quand un nœud tombe, Kubernetes relance le pod ailleurs et Longhorn lui attache une copie restante. Il est devenu la StorageClass par défaut ; les charts du projet n'indiquent pas de classe, ils n'ont donc pas changé.
+Longhorn 1.13.0 (release `longhorn`, [`values/longhorn.yaml`](values/longhorn.yaml)) garde chaque volume en trois copies, une par nœud. Quand un nœud tombe, Kubernetes relance le pod ailleurs et Longhorn lui attache une copie restante. C'est la seule StorageClass du cluster, et celle par défaut ; les charts du projet n'indiquent pas de classe, ils n'ont donc pas changé.
 
-Préparation des nœuds ([`infra/noeuds/preparer-longhorn.sh`](infra/noeuds/preparer-longhorn.sh)) : extension du disque, démarrage d'`iscsid` (Longhorn présente ses volumes en iSCSI), et exclusion des disques `sd*` dans `multipath.conf`, sans quoi `multipathd` s'empare des volumes Longhorn. Un fichier `local-storage.yaml.skip` empêche k3s de remettre `local-path` par défaut à chaque redémarrage.
+La préparation des nœuds est faite par cloud-init au premier démarrage ([`noeud-k8s.yaml`](infra/proxmox/noeud-k8s.yaml)) : installation et démarrage d'`iscsid` (Longhorn présente ses volumes en iSCSI), chargement du module `iscsi_tcp`, et exclusion des disques `sd*` dans `multipath.conf`, sans quoi `multipathd` s'empare des volumes Longhorn.
 
 Les trois VM partagent le même hôte et le même SSD. Longhorn protège donc d'une panne de VM (plantage, redémarrage, mise à jour), pas d'une panne de l'hôte, et chaque écriture part trois fois sur le même NVMe.
 
@@ -121,6 +120,9 @@ Helm installe un chart (des templates YAML et leurs valeurs par défaut) ; une i
 
 | Release | Chart | Contenu |
 |---|---|---|
+| metallb | metallb/metallb 0.16.2 | répartiteur MetalLB (IP virtuelle) |
+| reseau | `charts/reseau` | pool d'IP de MetalLB, réglages du Traefik de k3s |
+| longhorn | longhorn/longhorn 1.13.0 | stockage répliqué en 3 copies |
 | vault | hashicorp/vault 0.34.1 | Vault 2.0.4 (stockage fichier, un serveur), injecteur de secrets en 2 copies |
 | vault-bootstrap | `charts/vault-bootstrap` | Job d'initialisation, boucle de déverrouillage (unsealer) |
 | monitoring | prometheus-community/kube-prometheus-stack 93.5.0 | Prometheus, Grafana 13.3, node-exporter, kube-state-metrics |
@@ -129,7 +131,7 @@ Helm installe un chart (des templates YAML et leurs valeurs par défaut) ; une i
 | wordpress | `charts/webapp` | image `ghcr.io/enzobarthelemy/ynovm2dockerwp` |
 | nextcloud | `charts/webapp` | `nextcloud:32.0.15-apache` |
 
-Le même chart `mariadb` ou `webapp` sert deux fois avec des valeurs différentes : c'est le principal intérêt de Helm ici.
+Le même chart `mariadb` ou `webapp` sert deux fois avec des valeurs différentes : c'est le principal intérêt de Helm ici. Toutes les versions de charts sont figées dans le helmfile : une mise à jour passe par un commit, pas par le prochain déploiement.
 
 ### Secrets
 
@@ -218,7 +220,7 @@ Les valeurs par défaut de Kubernetes privilégient la sécurité des données �
 | `injector.replicas: 2` | `values/vault.yaml` | si l'injecteur manque, Kubernetes crée les pods sans leurs secrets (`failurePolicy: Ignore`) |
 | `terminationGracePeriodSeconds: 60` pour Prometheus | `values/monitoring.yaml` | 60 s au lieu de 600 s |
 | `initialDelaySeconds` 15 → 5 (readiness MariaDB) | `charts/mariadb` | la base reçoit du trafic 10 s plus tôt |
-| `nodeDownPodDeletionPolicy` | `infra/k3s/longhorn.yaml` | Longhorn supprime de force les pods restés sur un nœud mort |
+| `nodeDownPodDeletionPolicy` | `values/longhorn.yaml` | Longhorn supprime de force les pods restés sur un nœud mort |
 | taint `node.kubernetes.io/out-of-service` | `k8s-fencing` (section 7) | supprime l'attente de 6 min sur les volumes |
 
 Le test 2 a montré que l'éviction à 30 s et les correctifs Vault ne suffisaient pas : une fois le volume attaché, WordPress et Nextcloud étaient prêts en 11 s (contre 2 min 30 au test 1), mais les volumes restaient bloqués 6 min sur le nœud mort. Seul le taint `out-of-service` lève ce blocage.
@@ -298,6 +300,23 @@ Premier déploiement réussi le 13/11 : build en 1 min 25 s, deploy en 43 s (`sh
 
 Chaque `helmfile apply` met aussi à jour la release `monitoring`, pour rien. Le chart Grafana va chercher le volume déjà lié à son PVC (`lookup`), ce que `helm diff` ne fait pas : il voit une différence à chaque fois. Helm réapplique la même chose et aucun pod ne redémarre.
 
+### Reconstruire le cluster de zéro
+
+Le CD ne peut pas créer ce dont il a besoin pour tourner : les VM, k3s et ses propres runners. Tout le reste est dans le helmfile. Sur l'hôte Proxmox :
+
+```bash
+cd /root/k8s-stack/infra/proxmox      # copie du dossier infra/
+./sauver-runners                      # avant de détruire : identité GitHub des 3 runners
+systemctl stop k8s-fencing
+for id in 110 111 112; do qm stop $id; qm destroy $id --destroy-unreferenced-disks 1; done
+./construire-cluster.sh               # VM, k3s, runners, k8s-fencing
+gh workflow run ci-cd.yaml -R enzobarthelemy/ynovm2grp1dockerkube   # ou un push sur main
+```
+
+[`sauver-runners`](infra/proxmox/sauver-runners) copie les fichiers d'enregistrement de chaque runner (`.runner`, `.credentials` et sa clé privée) dans `/root/k8s-runners/`, en mode 600. [`construire-cluster.sh`](infra/proxmox/construire-cluster.sh) les remet en place : les runners reviennent sous le même nom, sans jeton à redemander à l'admin du dépôt. Les données, elles, ne survivent pas : contenus WordPress et Nextcloud, Grafana, et Vault, qui est réinitialisé avec de nouveaux mots de passe pour tout le monde.
+
+Test du 20/11 : VM, k3s et runners prêts en 5 minutes environ (2 min 30 pour créer les VM et former le cluster, 2 min pour les runners). Le cluster est alors nu : pas de StorageClass, un seul Traefik, sans IP virtuelle. Il a fallu corriger un point en route : sans `config.sh`, le script de service `svc.sh` du runner n'existe pas, `installer-runner.sh` le crée désormais à partir du modèle fourni dans le paquet.
+
 ### Observer
 
 ```bash
@@ -344,7 +363,6 @@ Le chart [`charts/dashboards`](charts/dashboards) transforme chaque fichier JSON
 - Certificat autosigné. Let's Encrypt ne peut pas valider par HTTP ou TLS-ALPN, les ports 80 et 443 étant pris ; il faudrait le challenge DNS-01 (API OVH).
 - Les applications ne voient pas l'IP des visiteurs : avec `externalTrafficPolicy: Cluster`, le trafic est translaté par le nœud. Nextcloud voit donc tout le monde avec une adresse en 10.42.x, et sa protection contre le brute-force traite tous les visiteurs comme un seul.
 - L'image WordPress échoue au premier démarrage (`tar: .: Cannot change mode`) puis redémarre une fois et fonctionne ; à corriger dans son entrypoint.
-- Les versions des charts `hashicorp/vault` et `kube-prometheus-stack` ne sont pas figées dans le helmfile. C'est ce qui a cassé Grafana, et le CD est passé de 93.2.2 à 93.5.0 le 20/11 sans qu'on le demande ; il faudrait fixer 0.34.1 et 93.5.0.
 - `k8s-fencing` ne clôture pas une VM allumée mais figée.
 
 ## Arborescence
@@ -353,12 +371,12 @@ Le chart [`charts/dashboards`](charts/dashboards) transforme chaque fichier JSON
 helmfile.yaml.gotmpl      point d'entrée : liste et ordre des releases
 values/                   paramètres de chaque release
 charts/
+  reseau/                 pool d'IP MetalLB, réglages de Traefik
   vault-bootstrap/        Job d'initialisation et unsealer
   dashboards/             tableau de bord Grafana du lab (JSON)
   mariadb/                MariaDB réutilisable (déployé deux fois)
   webapp/                 application web générique (déployée deux fois)
 infra/
-  proxmox/                création des VM, snippet cloud-init, script de clôture
-  k3s/                    config k3s, MetalLB, Traefik, Longhorn
-  noeuds/                 préparation des nœuds pour Longhorn
+  proxmox/                construction du cluster (VM, cloud-init, k3s), arrêt, démarrage, clôture
+  noeuds/                 installation d'un runner GitHub Actions
 ```

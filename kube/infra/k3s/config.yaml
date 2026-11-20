@@ -1,4 +1,0 @@
-# /etc/rancher/k3s/config.yaml sur les 3 nœuds.
-# Le répartiteur intégré de k3s (servicelb) est remplacé par MetalLB.
-disable:
-  - servicelb

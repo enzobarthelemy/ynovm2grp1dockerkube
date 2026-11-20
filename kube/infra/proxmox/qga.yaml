@@ -1,7 +1,0 @@
-#cloud-config
-# À placer dans /var/lib/vz/snippets/ : installe l'agent invité QEMU.
-# Proxmox s'en sert pour lancer des commandes dans les VM (le VLAN 199 ne joint pas le LAN).
-packages:
-  - qemu-guest-agent
-runcmd:
-  - [systemctl, enable, --now, qemu-guest-agent]
