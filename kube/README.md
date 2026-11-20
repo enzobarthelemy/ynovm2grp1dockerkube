@@ -317,6 +317,8 @@ gh workflow run ci-cd.yaml -R enzobarthelemy/ynovm2grp1dockerkube   # ou un push
 
 Test du 20/11 : VM, k3s et runners prêts en 5 minutes environ (2 min 30 pour créer les VM et former le cluster, 2 min pour les runners). Le cluster est alors nu : pas de StorageClass, un seul Traefik, sans IP virtuelle. Il a fallu corriger un point en route : sans `config.sh`, le script de service `svc.sh` du runner n'existe pas, `installer-runner.sh` le crée désormais à partir du modèle fourni dans le paquet.
 
+Puis le CD, lancé par le push du commit `992a326` : build en 1 min 54 s, deploy en 5 min 32 s. MetalLB, le pool d'IP et Longhorn sont prêts en moins d'une minute, l'initialisation de Vault prend ensuite 2 minutes, les bases, la supervision et les applications suivent. À la fin : 14 releases, 7 volumes sains en 3 copies, Vault déverrouillé, Traefik en 3 copies sur l'IP virtuelle et les trois sites en ligne depuis Internet. Il s'est écoulé 13 minutes entre la destruction des anciennes VM et les sites en ligne, dont 2 perdues sur le correctif du runner.
+
 ### Observer
 
 ```bash
