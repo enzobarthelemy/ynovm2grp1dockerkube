@@ -167,6 +167,7 @@ Le projet s'installait sur le papier mais pas sur un cluster vierge avec les cha
 | `helmfile.yaml.gotmpl` | `helmfile apply` lance un `helm diff` avant d'installer ; sur un cluster vierge, les types `Prometheus`, `ServiceMonitor`... n'existent pas encore et le diff échoue. | `disableValidationOnInstall: true` sur la release monitoring. |
 | `charts/mariadb`, `charts/webapp`, `values/wordpress.yaml` | Un volume Longhorn neuf appartient à root. MariaDB tourne en uid 999 et l'image WordPress en `www-data` (33) : « Permission denied ». `local-path` créait des dossiers en 0777 et cachait le problème. | `podSecurityContext.fsGroup` (999 et 33) : Kubernetes donne le volume au bon groupe au montage. |
 | `values/*.yaml` | Noms en `*.ynovm2.lab`, joignables seulement avec une entrée dans `/etc/hosts`. | `wp.`, `cloud.` et `monitor.appart.cbarreda.fr`, URL racine de Grafana en `https://...:8443/`. |
+| `charts/vault-bootstrap/files/unseal.sh` | Au démarrage du cluster, `apk add curl jq` échouait parce que le réseau des pods n'était pas encore prêt. Le script ne le voyait pas et tournait sur « curl: not found » : Vault est resté scellé 7 min au redémarrage du 20/11. | Nouvel essai toutes les 5 s jusqu'à ce que l'installation réussisse. |
 
 Le dry-run `helmfile template` a trouvé l'erreur Grafana avant tout déploiement ; les deux autres sont apparues au premier `helmfile apply`.
 
@@ -276,6 +277,25 @@ helmfile apply               # installe ou met à jour tout, relançable sans ri
 - Nouvelle version de WordPress : `WP_IMAGE_TAG=v1.2.3 helmfile apply`
 - Tout supprimer : `helmfile destroy`. Les volumes des StatefulSets et ceux marqués `keep` restent ; pour repartir de zéro, supprimer aussi les PVC et le Secret `vault/vault-unseal-keys`.
 - Le StatefulSet de Vault se met à jour en `OnDelete` : après un changement de `values/vault.yaml`, supprimer le pod `vault-0` pour qu'il soit recréé.
+
+### Arrêter et redémarrer le lab
+
+Les VM ne démarrent pas avec l'hôte. Deux scripts, lancés sur l'hôte Proxmox, s'en chargent :
+
+- [`k8s-arret`](infra/proxmox/k8s-arret) met en pause `k8s-fencing`, qui prendrait l'arrêt pour une panne, et note le nombre de copies de chaque charge dans `/var/lib/k8s-stack/replicas.txt`. Il réduit ensuite à zéro les applications, puis les bases, puis Vault : MariaDB et Vault s'arrêtent sur un signal propre. Il attend que Longhorn ait détaché les 7 volumes avant d'éteindre les trois VM, comme le recommande la documentation Longhorn. Rien n'est supprimé.
+- [`k8s-demarrage`](infra/proxmox/k8s-demarrage) rallume les VM, attend les trois nœuds et relance `k8s-fencing`. Il remonte ensuite Vault et attend son déverrouillage, puis les bases, puis les applications, avec le nombre de copies noté.
+
+L'arrêt du 13/11 a pris une minute. Le démarrage du 20/11 en a pris neuf, dont sept perdues par le bug de l'unsealer décrit en section 5.
+
+### Déploiement continu
+
+Le workflow [`ci-cd.yaml`](../.github/workflows/ci-cd.yaml) se déclenche à chaque push sur `main` qui touche `kube/` ou l'image WordPress. Le job `build` tourne chez GitHub : il construit l'image, la scanne avec Trivy et l'envoie sur ghcr.io avec le tag `sha-<commit>`. Le job `deploy` tourne sur un runner du cluster : il lance `helmfile apply` avec ce tag et attend la fin du déploiement de WordPress.
+
+Chaque nœud porte un runner, installé par [`infra/noeuds/installer-runner.sh`](infra/noeuds/installer-runner.sh). C'est un service `actions.runner.*` qui tourne sous l'utilisateur `github-runner`, avec sa copie du kubeconfig et le plugin helm-diff. Si un nœud tombe, GitHub confie le job à un autre runner ; `concurrency: deploy-k3s` empêche deux déploiements en même temps. Le dépôt est public, mais le workflow ne se déclenche ni sur les pull requests ni depuis un fork : seuls ceux qui peuvent pousser sur `main` exécutent du code sur le cluster.
+
+Premier déploiement réussi le 13/11 : build en 1 min 25 s, deploy en 43 s (`sha-60d5f00`).
+
+Chaque `helmfile apply` met aussi à jour la release `monitoring`, pour rien. Le chart Grafana va chercher le volume déjà lié à son PVC (`lookup`), ce que `helm diff` ne fait pas : il voit une différence à chaque fois. Helm réapplique la même chose et aucun pod ne redémarre.
 
 ### Observer
 

@@ -1,0 +1,91 @@
+#!/bin/bash
+# k8s-arret : arrêt propre de la stack puis des 3 VM k3s (à lancer sur l'hôte Proxmox).
+#
+# On réduit les applications à 0 copie dans l'ordre inverse des dépendances
+# (applis, puis bases, puis Vault) : MariaDB et Vault s'arrêtent sur un signal propre
+# et Longhorn détache ses volumes avant qu'on éteigne les nœuds. Rien n'est supprimé.
+# Le nombre de copies de chaque charge est noté pour k8s-demarrage.
+
+VMS="110 111 112"
+ETAT=/var/lib/k8s-stack
+mkdir -p "$ETAT"
+
+# k3s kubectl via le premier nœud allumé dont l'agent répond (le VLAN 199 ne joint pas l'hôte)
+kube() {
+  local id
+  for id in $VMS; do
+    qm status "$id" 2>/dev/null | grep -q "status: running" || continue
+    qm agent "$id" ping >/dev/null 2>&1 || continue
+    qm guest exec "$id" --timeout 60 -- k3s kubectl "$@" 2>/dev/null | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+sys.stdout.write(d.get("out-data") or "")
+sys.exit(d.get("exitcode") or 0)' && return 0
+  done
+  return 1
+}
+dit() { echo "$(date +%T) $*"; }
+
+# attend qu'une charge n'ait plus aucun pod
+attendre_zero() { # ns type nom
+  for i in $(seq 1 60); do
+    r=$(kube -n "$1" get "$2" "$3" -o 'jsonpath={.status.replicas}')
+    [ -z "$r" ] || [ "$r" = 0 ] && return 0
+    sleep 3
+  done
+  dit "  $1/$3 a encore des pods après 3 min"
+}
+
+# le script de clôture prendrait l'arrêt pour une panne
+systemctl stop k8s-fencing 2>/dev/null && dit "k8s-fencing arrêté pendant la maintenance"
+
+PROM=$(kube -n monitoring get prometheus -o 'jsonpath={.items[0].metadata.name}')
+CHARGES="wordpress deployment wordpress
+nextcloud deployment nextcloud
+monitoring deployment monitoring-grafana
+wordpress statefulset wordpress-db
+nextcloud statefulset nextcloud-db
+vault statefulset vault"
+
+: > "$ETAT/replicas.txt"
+while read -r ns type nom; do
+  echo "$ns $type $nom $(kube -n "$ns" get "$type" "$nom" -o 'jsonpath={.spec.replicas}')" >> "$ETAT/replicas.txt"
+done <<< "$CHARGES"
+p=$(kube -n monitoring get prometheus "$PROM" -o 'jsonpath={.spec.replicas}')
+echo "monitoring prometheus $PROM ${p:-1}" >> "$ETAT/replicas.txt"
+dit "copies notées dans $ETAT/replicas.txt"
+
+dit "1/3 applications : WordPress, Nextcloud, Grafana, Prometheus"
+kube -n wordpress scale deployment wordpress --replicas=0 >/dev/null
+kube -n nextcloud scale deployment nextcloud --replicas=0 >/dev/null
+kube -n monitoring scale deployment monitoring-grafana --replicas=0 >/dev/null
+kube -n monitoring patch prometheus "$PROM" --type merge -p '{"spec":{"replicas":0}}' >/dev/null
+attendre_zero wordpress deployment wordpress
+attendre_zero nextcloud deployment nextcloud
+attendre_zero monitoring deployment monitoring-grafana
+attendre_zero monitoring statefulset "prometheus-$PROM"
+
+dit "2/3 bases MariaDB"
+kube -n wordpress scale statefulset wordpress-db --replicas=0 >/dev/null
+kube -n nextcloud scale statefulset nextcloud-db --replicas=0 >/dev/null
+attendre_zero wordpress statefulset wordpress-db
+attendre_zero nextcloud statefulset nextcloud-db
+
+dit "3/3 Vault"
+kube -n vault scale statefulset vault --replicas=0 >/dev/null
+attendre_zero vault statefulset vault
+
+dit "attente du détachement des volumes Longhorn"
+for i in $(seq 1 60); do
+  etats=$(kube -n longhorn-system get volumes.longhorn.io -o 'jsonpath={range .items[*]}{.status.state} {end}')
+  [ -n "$etats" ] && ! echo "$etats" | grep -qvE '^(detached ?)+$' && break
+  sleep 3
+done
+dit "volumes : $(echo $etats | tr ' ' '\n' | sort | uniq -c | tr '\n' ' ')"
+
+dit "extinction des VM"
+for id in $VMS; do qm shutdown "$id" --timeout 180 & done; wait
+qm list | awk 'NR==1 || /k8s-/'

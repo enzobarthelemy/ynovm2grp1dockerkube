@@ -20,12 +20,15 @@ mkdir -p "$STATE"
 
 log() { echo "$*"; }
 
+# VM allumée = son processus QEMU existe. Bien moins coûteux que « qm status » (un
+# interpréteur Perl à chaque appel) : la première version consommait ~12 % d'un cœur.
+allumee() { local p=/var/run/qemu-server/$1.pid; [ -f "$p" ] && kill -0 "$(cat "$p")" 2>/dev/null; }
+
 # Exécute k3s kubectl via le premier nœud allumé dont l'agent répond.
 kube() {
   local id
   for id in $VMS; do
-    qm status "$id" 2>/dev/null | grep -q "status: running" || continue
-    qm agent "$id" ping >/dev/null 2>&1 || continue
+    allumee "$id" || continue
     qm guest exec "$id" --timeout 20 -- k3s kubectl "$@" 2>/dev/null | python3 -c '
 import sys, json
 try:
