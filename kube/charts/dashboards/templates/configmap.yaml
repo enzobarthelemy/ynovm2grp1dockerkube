@@ -1,0 +1,18 @@
+{{- /*
+Un ConfigMap par fichier JSON de files/. Le sidecar de Grafana repère le label
+grafana_dashboard et écrit le JSON dans /tmp/dashboards ; Grafana le charge seul.
+Pour modifier un tableau de bord : l'éditer dans Grafana, « Export > JSON »,
+remplacer le fichier ici et redéployer.
+*/ -}}
+{{- range $path, $_ := .Files.Glob "files/*.json" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-{{ base $path | trimSuffix ".json" }}
+  labels:
+    grafana_dashboard: "1"
+data:
+  {{ base $path }}: |-
+{{ $.Files.Get $path | indent 4 }}
+{{- end }}

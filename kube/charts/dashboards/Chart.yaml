@@ -1,0 +1,4 @@
+apiVersion: v2
+name: dashboards
+description: Tableau de bord Grafana du lab (un seul, à la place de ceux de kube-prometheus-stack)
+version: 0.1.0

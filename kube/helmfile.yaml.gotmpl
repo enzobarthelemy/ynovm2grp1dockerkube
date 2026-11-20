@@ -43,6 +43,12 @@ releases:
     # cluster vierge, le `helm diff` d'apply échoue car ces types n'existent pas encore.
     disableValidationOnInstall: true
 
+  # Le tableau de bord Grafana du lab, lu par le sidecar de Grafana
+  - name: dashboards
+    namespace: monitoring
+    chart: ./charts/dashboards
+    needs: [monitoring/monitoring]
+
   # --- 4. WordPress -------------------------------------------------------------
   - name: wordpress-db
     namespace: wordpress

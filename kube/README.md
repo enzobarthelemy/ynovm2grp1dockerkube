@@ -123,7 +123,8 @@ Helm installe un chart (des templates YAML et leurs valeurs par défaut) ; une i
 |---|---|---|
 | vault | hashicorp/vault 0.34.1 | Vault 2.0.4 (stockage fichier, un serveur), injecteur de secrets en 2 copies |
 | vault-bootstrap | `charts/vault-bootstrap` | Job d'initialisation, boucle de déverrouillage (unsealer) |
-| monitoring | prometheus-community/kube-prometheus-stack 93.2.2 | Prometheus, Grafana 13.3, node-exporter, kube-state-metrics |
+| monitoring | prometheus-community/kube-prometheus-stack 93.5.0 | Prometheus, Grafana 13.3, node-exporter, kube-state-metrics |
+| dashboards | `charts/dashboards` | le tableau de bord Grafana du lab |
 | wordpress-db, nextcloud-db | `charts/mariadb` | MariaDB 12.3 (`mariadb:lts-ubi10`), un chart déployé deux fois |
 | wordpress | `charts/webapp` | image `ghcr.io/enzobarthelemy/ynovm2dockerwp` |
 | nextcloud | `charts/webapp` | `nextcloud:32.0.15-apache` |
@@ -146,7 +147,7 @@ Aucun mot de passe n'est écrit dans le dépôt.
 |---|---|
 | WordPress | https://wp.appart.cbarreda.fr:8443 |
 | Nextcloud | https://cloud.appart.cbarreda.fr:8443 |
-| Grafana | https://monitor.appart.cbarreda.fr:8443 (compte `admin`) |
+| Grafana | https://monitor.appart.cbarreda.fr:8443 (compte `admin`, s'ouvre sur le tableau de bord du lab) |
 
 Les mêmes noms répondent en HTTP sur le port 8080. Le certificat est celui que Traefik génère par défaut, le navigateur affiche donc un avertissement une fois par nom. Vault et Prometheus ne sont pas exposés (`kubectl port-forward`).
 
@@ -319,7 +320,21 @@ Symptômes déjà rencontrés :
 
 ### Supervision
 
-kube-prometheus-stack installe des tableaux de bord tout faits. L'équivalent du tableau de bord par projet compose est « Kubernetes / Compute Resources / Namespace (Pods) », filtré par namespace. Pour ajouter un tableau de bord : un ConfigMap avec le label `grafana_dashboard: "1"` contenant le JSON.
+Grafana s'ouvre sur un seul tableau de bord, « Vue d'ensemble du lab k3s » ([`charts/dashboards/files/vue-ensemble.json`](charts/dashboards/files/vue-ensemble.json)). Les 24 tableaux fournis par kube-prometheus-stack sont désactivés (`grafana.defaultDashboardsEnabled: false`) : trop détaillés pour suivre le lab, et deux d'entre eux visent AIX et macOS. Il se lit de haut en bas :
+
+| Section | Contenu |
+|---|---|
+| En un coup d'œil | nœuds prêts, pods en difficulté, Vault déverrouillé ou scellé, volumes dégradés, redémarrages sur 24 h, part d'erreurs 5xx |
+| Applications | état de chaque application (OK, Dégradée, Arrêtée), processeur et mémoire par application |
+| Trafic web | requêtes par seconde et temps de réponse (95 % des requêtes) de chaque site, vus par Traefik |
+| Machines virtuelles | processeur, mémoire et disque de k8s-01 à k8s-03 |
+| Stockage Longhorn | état de chaque volume (Sain, Dégradé, En panne, Détaché) et son remplissage |
+
+C'est l'écran à garder ouvert pendant un test de panne : le compteur de nœuds passe à 2 / 3, les applications du nœud coupé passent en Arrêtée puis reviennent ailleurs, et les volumes restent en Dégradé (deux copies sur trois) jusqu'au retour du nœud.
+
+Deux sources ont été ajoutées pour ce tableau, dans [`values/monitoring.yaml`](values/monitoring.yaml) : un PodMonitor pour Traefik (port `metrics`, 9100) et un ServiceMonitor pour les managers Longhorn (port 9500). Le chart Longhorn pose une NetworkPolicy qui n'accepte sur ce port que ses propres pods ; une seconde NetworkPolicy, déclarée dans `extraManifests`, l'ouvre à Prometheus.
+
+Le chart [`charts/dashboards`](charts/dashboards) transforme chaque fichier JSON de `files/` en ConfigMap avec le label `grafana_dashboard: "1"`, que le sidecar de Grafana charge tout seul. Pour modifier le tableau : l'éditer dans Grafana, « Exporter > JSON », remplacer le fichier et redéployer (Grafana n'enregistre pas lui-même un tableau provisionné). Pour retrouver ceux du chart : `defaultDashboardsEnabled: true`.
 
 ## 9. Limites connues
 
@@ -329,7 +344,7 @@ kube-prometheus-stack installe des tableaux de bord tout faits. L'équivalent du
 - Certificat autosigné. Let's Encrypt ne peut pas valider par HTTP ou TLS-ALPN, les ports 80 et 443 étant pris ; il faudrait le challenge DNS-01 (API OVH).
 - Les applications ne voient pas l'IP des visiteurs : avec `externalTrafficPolicy: Cluster`, le trafic est translaté par le nœud. Nextcloud voit donc tout le monde avec une adresse en 10.42.x, et sa protection contre le brute-force traite tous les visiteurs comme un seul.
 - L'image WordPress échoue au premier démarrage (`tar: .: Cannot change mode`) puis redémarre une fois et fonctionne ; à corriger dans son entrypoint.
-- Les versions des charts `hashicorp/vault` et `kube-prometheus-stack` ne sont pas figées dans le helmfile. C'est ce qui a cassé Grafana ; il faudrait fixer 0.34.1 et 93.2.2.
+- Les versions des charts `hashicorp/vault` et `kube-prometheus-stack` ne sont pas figées dans le helmfile. C'est ce qui a cassé Grafana, et le CD est passé de 93.2.2 à 93.5.0 le 20/11 sans qu'on le demande ; il faudrait fixer 0.34.1 et 93.5.0.
 - `k8s-fencing` ne clôture pas une VM allumée mais figée.
 
 ## Arborescence
@@ -339,6 +354,7 @@ helmfile.yaml.gotmpl      point d'entrée : liste et ordre des releases
 values/                   paramètres de chaque release
 charts/
   vault-bootstrap/        Job d'initialisation et unsealer
+  dashboards/             tableau de bord Grafana du lab (JSON)
   mariadb/                MariaDB réutilisable (déployé deux fois)
   webapp/                 application web générique (déployée deux fois)
 infra/

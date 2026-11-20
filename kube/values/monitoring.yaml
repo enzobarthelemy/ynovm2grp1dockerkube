@@ -28,7 +28,46 @@ prometheus:
             requests:
               storage: 5Gi
 
+  # Deux sources de plus pour le tableau de bord : Traefik (trafic par site) et
+  # Longhorn (état des volumes). Le chart y ajoute le label release: monitoring,
+  # celui que Prometheus sélectionne.
+  additionalPodMonitors:
+    - name: traefik
+      namespaceSelector: { matchNames: [kube-system] }
+      selector: { matchLabels: { app.kubernetes.io/name: traefik } }
+      podMetricsEndpoints: [{ port: metrics }]
+  additionalServiceMonitors:
+    - name: longhorn
+      namespaceSelector: { matchNames: [longhorn-system] }
+      selector: { matchLabels: { app: longhorn-manager } }   # service longhorn-backend
+      endpoints: [{ port: manager }]
+
+# Les managers Longhorn n'acceptent que le trafic des pods Longhorn (NetworkPolicy
+# du chart Longhorn) : on ouvre leur port de métriques à Prometheus.
+extraManifests:
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: allow-prometheus-metrics
+      namespace: longhorn-system
+    spec:
+      podSelector: { matchLabels: { app: longhorn-manager } }
+      policyTypes: [Ingress]
+      ingress:
+        - from:
+            - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } }
+              podSelector: { matchLabels: { app.kubernetes.io/name: prometheus } }
+          ports: [{ port: 9500, protocol: TCP }]
+
 grafana:
+  # Le chart fournit ~25 tableaux de bord très détaillés (plus des modèles pour AIX et
+  # macOS). On les remplace par un seul, fait pour le lab : charts/dashboards.
+  defaultDashboardsEnabled: false
+  grafana.ini:
+    dashboards:
+      # page d'accueil = ce tableau de bord (fichier écrit par le sidecar)
+      default_home_dashboard_path: /tmp/dashboards/vue-ensemble.json
+
   # Par défaut Kubernetes attend 300 s avant de recréer ailleurs un pod dont le nœud
   # ne répond plus. Les volumes étant répliqués (Longhorn), on repart après 30 s.
   tolerations:
