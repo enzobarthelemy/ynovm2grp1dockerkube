@@ -62,7 +62,10 @@ jobs:
         working-directory: kube
         env:
           WP_IMAGE_TAG: ${{ needs.build.outputs.tag }}   # lu par helmfile.yaml.gotmpl
-        run: helmfile apply
+        # Une release à la fois : par défaut helmfile lance les 14 « helm diff » en même
+        # temps, ce qui a saturé le nœud du runner (2 vCPU, 4 Go) le 20/11 au point que
+        # Kubernetes l'a déclaré en panne et a déplacé ses pods.
+        run: helmfile apply --concurrency 1
 
       - name: Vérification
         run: |

@@ -1,7 +1,21 @@
 # Chart officiel hashicorp/vault
 injector:
   enabled: true          # webhook qui ajoute l'agent Vault dans les pods annotés
-  replicas: 2            # webhook absent = pods créés SANS leurs secrets : on le double
+  replicas: 2            # une copie par nœud au moins pendant une panne
+  webhook:
+    # Par défaut (Ignore), un pod créé pendant que l'injecteur ne répond pas démarre
+    # SANS son agent Vault, donc sans ses mots de passe, et ne s'en remet jamais seul
+    # (vu le 20/11 : WordPress en 500, Grafana en boucle). Avec Fail, la création est
+    # refusée et Kubernetes réessaie jusqu'au retour de l'injecteur.
+    failurePolicy: Fail
+    timeoutSeconds: 10   # au lieu de 30 : on réessaie plus vite si une copie est morte
+    # Fail ne vaut que pour les namespaces des applications : ailleurs (kube-system,
+    # Longhorn, vault lui-même), l'injecteur ne doit jamais bloquer un pod.
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: [wordpress, nextcloud, monitoring]
 
 server:
   # Par défaut Kubernetes attend 300 s avant de recréer ailleurs un pod dont le nœud
@@ -17,12 +31,22 @@ server:
         address         = "[::]:8200"
         cluster_address = "[::]:8201"
         tls_disable     = 1
+        # /v1/sys/metrics lisible sans jeton (Prometheus) ; le port n'est ouvert
+        # qu'aux namespaces autorisés (NetworkPolicy vault-server)
+        telemetry {
+          unauthenticated_metrics_access = true
+        }
+      }
+      # métriques au format Prometheus, dont vault_core_unsealed (1 = déverrouillé)
+      telemetry {
+        prometheus_retention_time = "30s"
+        disable_hostname          = true
       }
       storage "file" {
         path = "/vault/data"
       }
   dataStorage:
-    enabled: true        # PVC (StorageClass local-path de k3s) = ex-volume vault_data
+    enabled: true        # PVC (Longhorn, 3 copies) = ex-volume vault_data
     size: 1Gi
   # Par défaut, un Vault scellé est "NotReady" -> helm --wait bloquerait.
   # On le considère prêt même scellé/non initialisé : c'est le bootstrap qui s'en charge.

@@ -171,6 +171,9 @@ Le projet s'installait sur le papier mais pas sur un cluster vierge avec les cha
 | `charts/mariadb`, `charts/webapp`, `values/wordpress.yaml` | Un volume Longhorn neuf appartient à root. MariaDB tourne en uid 999 et l'image WordPress en `www-data` (33) : « Permission denied ». `local-path` créait des dossiers en 0777 et cachait le problème. | `podSecurityContext.fsGroup` (999 et 33) : Kubernetes donne le volume au bon groupe au montage. |
 | `values/*.yaml` | Noms en `*.ynovm2.lab`, joignables seulement avec une entrée dans `/etc/hosts`. | `wp.`, `cloud.` et `monitor.appart.cbarreda.fr`, URL racine de Grafana en `https://...:8443/`. |
 | `charts/vault-bootstrap/files/unseal.sh` | Au démarrage du cluster, `apk add curl jq` échouait parce que le réseau des pods n'était pas encore prêt. Le script ne le voyait pas et tournait sur « curl: not found » : Vault est resté scellé 7 min au redémarrage du 20/11. | Nouvel essai toutes les 5 s jusqu'à ce que l'installation réussisse. |
+| `values/vault.yaml` | L'injecteur de Vault est en `failurePolicy: Ignore` par défaut : un pod créé pendant que l'injecteur ne répond pas démarre sans son agent, donc sans ses mots de passe, et ne s'en remet jamais seul. Le 20/11, après une éviction, WordPress répondait 500 et Grafana redémarrait en boucle. | `failurePolicy: Fail` limité aux namespaces des applications, délai de 10 s : la création est refusée et Kubernetes réessaie jusqu'au retour de l'injecteur. |
+| `.github/workflows/ci-cd.yaml` | helmfile lance par défaut les 14 `helm diff` en même temps. Sur le nœud du runner (2 vCPU, 4 Go, pas de swap), la mémoire a saturé, k3s n'a plus répondu et le nœud a été déclaré en panne une minute : ses pods ont été évincés en plein déploiement. | `helmfile apply --concurrency 1`, une release à la fois. |
+| `values/vault.yaml`, tableau de bord | Le pod Vault est déclaré prêt même scellé (sonde réglée ainsi pour `helm --wait`) : la tuile « Vault » du tableau de bord, calculée sur cet état, aurait affiché « Déverrouillé » sur un Vault scellé. | Télémétrie de Vault activée et lue par Prometheus ; la tuile suit `vault_core_unsealed`. |
 
 Le dry-run `helmfile template` a trouvé l'erreur Grafana avant tout déploiement ; les deux autres sont apparues au premier `helmfile apply`.
 
@@ -294,6 +297,8 @@ L'arrêt du 13/11 a pris une minute. Le démarrage du 20/11 en a pris neuf, dont
 
 Le workflow [`ci-cd.yaml`](../.github/workflows/ci-cd.yaml) se déclenche à chaque push sur `main` qui touche `kube/` ou l'image WordPress. Le job `build` tourne chez GitHub : il construit l'image, la scanne avec Trivy et l'envoie sur ghcr.io avec le tag `sha-<commit>`. Le job `deploy` tourne sur un runner du cluster : il lance `helmfile apply` avec ce tag et attend la fin du déploiement de WordPress.
 
+Le déploiement est idempotent : `helmfile apply` compare chaque release à ce qui tourne et ne met à jour que celles qui diffèrent. Rien n'est réinstallé, les volumes et Vault (déjà initialisé, mots de passe déjà générés) restent tels quels. En pratique, un push met à jour WordPress (nouveau tag d'image à chaque commit) et ce qui a changé dans `kube/`. Le job lance helmfile une release à la fois (`--concurrency 1`), voir la section 5.
+
 Chaque nœud porte un runner, installé par [`infra/noeuds/installer-runner.sh`](infra/noeuds/installer-runner.sh). C'est un service `actions.runner.*` qui tourne sous l'utilisateur `github-runner`, avec sa copie du kubeconfig et le plugin helm-diff. Si un nœud tombe, GitHub confie le job à un autre runner ; `concurrency: deploy-k3s` empêche deux déploiements en même temps. Le dépôt est public, mais le workflow ne se déclenche ni sur les pull requests ni depuis un fork : seuls ceux qui peuvent pousser sur `main` exécutent du code sur le cluster.
 
 Premier déploiement réussi le 13/11 : build en 1 min 25 s, deploy en 43 s (`sha-60d5f00`).
@@ -318,6 +323,8 @@ gh workflow run ci-cd.yaml -R enzobarthelemy/ynovm2grp1dockerkube   # ou un push
 Test du 20/11 : VM, k3s et runners prêts en 5 minutes environ (2 min 30 pour créer les VM et former le cluster, 2 min pour les runners). Le cluster est alors nu : pas de StorageClass, un seul Traefik, sans IP virtuelle. Il a fallu corriger un point en route : sans `config.sh`, le script de service `svc.sh` du runner n'existe pas, `installer-runner.sh` le crée désormais à partir du modèle fourni dans le paquet.
 
 Puis le CD, lancé par le push du commit `992a326` : build en 1 min 54 s, deploy en 5 min 32 s. MetalLB, le pool d'IP et Longhorn sont prêts en moins d'une minute, l'initialisation de Vault prend ensuite 2 minutes, les bases, la supervision et les applications suivent. À la fin : 14 releases, 7 volumes sains en 3 copies, Vault déverrouillé, Traefik en 3 copies sur l'IP virtuelle et les trois sites en ligne depuis Internet. Il s'est écoulé 13 minutes entre la destruction des anciennes VM et les sites en ligne, dont 2 perdues sur le correctif du runner.
+
+Le push suivant, sur le cluster plein, a échoué et révélé deux défauts. Les 14 `helm diff` lancés en parallèle ont saturé k8s-01, qui portait le runner : Kubernetes l'a déclaré en panne et a évincé ses pods. L'injecteur de Vault faisait partie des pods évincés, et WordPress et Grafana ont été recréés sans leurs secrets. Il a fallu supprimer leurs pods à la main. Les deux corrections sont dans le tableau de la section 5.
 
 ### Observer
 
@@ -353,7 +360,7 @@ Grafana s'ouvre sur un seul tableau de bord, « Vue d'ensemble du lab k3s » ([`
 
 C'est l'écran à garder ouvert pendant un test de panne : le compteur de nœuds passe à 2 / 3, les applications du nœud coupé passent en Arrêtée puis reviennent ailleurs, et les volumes restent en Dégradé (deux copies sur trois) jusqu'au retour du nœud.
 
-Deux sources ont été ajoutées pour ce tableau, dans [`values/monitoring.yaml`](values/monitoring.yaml) : un PodMonitor pour Traefik (port `metrics`, 9100) et un ServiceMonitor pour les managers Longhorn (port 9500). Le chart Longhorn pose une NetworkPolicy qui n'accepte sur ce port que ses propres pods ; une seconde NetworkPolicy, déclarée dans `extraManifests`, l'ouvre à Prometheus.
+Trois sources ont été ajoutées pour ce tableau, dans [`values/monitoring.yaml`](values/monitoring.yaml) : un PodMonitor pour Traefik (port `metrics`, 9100), un ServiceMonitor pour les managers Longhorn (port 9500) et un pour Vault (`/v1/sys/metrics`, d'où vient `vault_core_unsealed`). Vault ne publie ses métriques sans jeton que sur son port 8200, déjà réservé par sa NetworkPolicy aux namespaces autorisés, dont `monitoring`. Le chart Longhorn pose une NetworkPolicy qui n'accepte sur ce port que ses propres pods ; une seconde NetworkPolicy, déclarée dans `extraManifests`, l'ouvre à Prometheus.
 
 Le chart [`charts/dashboards`](charts/dashboards) transforme chaque fichier JSON de `files/` en ConfigMap avec le label `grafana_dashboard: "1"`, que le sidecar de Grafana charge tout seul. Pour modifier le tableau : l'éditer dans Grafana, « Exporter > JSON », remplacer le fichier et redéployer (Grafana n'enregistre pas lui-même un tableau provisionné). Pour retrouver ceux du chart : `defaultDashboardsEnabled: true`.
 

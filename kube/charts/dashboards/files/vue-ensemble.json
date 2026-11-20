@@ -184,7 +184,7 @@
     {
       "type": "stat",
       "title": "Vault",
-      "description": "Vault n'est prêt qu'une fois déverrouillé. Scellé, il ne fournit plus les mots de passe aux applications qui démarrent.",
+      "description": "État lu dans les métriques de Vault (vault_core_unsealed). Scellé, il ne fournit plus les mots de passe aux applications qui démarrent. « Arrêté » : Vault ne répond pas.",
       "id": 4,
       "datasource": {
         "type": "prometheus",
@@ -202,7 +202,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(kube_pod_status_ready{namespace=\"vault\",pod=\"vault-0\",condition=\"true\"})",
+          "expr": "max(vault_core_unsealed)",
           "legendFormat": "",
           "refId": "A",
           "instant": true,

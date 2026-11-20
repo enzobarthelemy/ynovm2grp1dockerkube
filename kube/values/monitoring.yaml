@@ -28,8 +28,8 @@ prometheus:
             requests:
               storage: 5Gi
 
-  # Deux sources de plus pour le tableau de bord : Traefik (trafic par site) et
-  # Longhorn (état des volumes). Le chart y ajoute le label release: monitoring,
+  # Trois sources de plus pour le tableau de bord : Traefik (trafic par site),
+  # Longhorn (état des volumes) et Vault (scellé ou non). Le chart y ajoute le label release: monitoring,
   # celui que Prometheus sélectionne.
   additionalPodMonitors:
     - name: traefik
@@ -41,6 +41,17 @@ prometheus:
       namespaceSelector: { matchNames: [longhorn-system] }
       selector: { matchLabels: { app: longhorn-manager } }   # service longhorn-backend
       endpoints: [{ port: manager }]
+    # Vault : seule source fiable de son état scellé (son pod est « prêt » même scellé).
+    # Déclaré ici et non dans le chart Vault, installé avant les CRD de la supervision.
+    - name: vault
+      namespaceSelector: { matchNames: [vault] }
+      selector:
+        matchLabels: { app.kubernetes.io/name: vault }
+        matchExpressions: [{ key: vault-internal, operator: DoesNotExist }]   # service « vault » seul
+      endpoints:
+        - port: http
+          path: /v1/sys/metrics
+          params: { format: [prometheus] }
 
 # Les managers Longhorn n'acceptent que le trafic des pods Longhorn (NetworkPolicy
 # du chart Longhorn) : on ouvre leur port de métriques à Prometheus.
