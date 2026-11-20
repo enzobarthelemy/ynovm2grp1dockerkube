@@ -40,7 +40,7 @@ Tout tourne sur un seul serveur Proxmox VE (i5-12400, 31 Go de RAM, SSD NVMe de 
 | k8s-02 | 111 | 10.1.199.111 | 2 | 4 Go | 64 Go |
 | k8s-03 | 112 | 10.1.199.112 | 2 | 4 Go | 64 Go |
 
-Les VM partent de l'image cloud Ubuntu 24.04 (sans interface graphique), configurée par cloud-init : IP fixe (pas de DHCP sur ce VLAN), passerelle 10.1.199.254, DNS 1.1.1.1. Aucune clé SSH ni mot de passe n'est injecté ; chacun pose le sien avec `qm guest passwd <id> ubuntu`. Le snippet [`infra/proxmox/noeud-k8s.yaml`](infra/proxmox/noeud-k8s.yaml) (vendor-data cloud-init) installe l'agent invité QEMU, prépare les nœuds pour Longhorn (section 3) et écrit la configuration de k3s.
+Les VM partent de l'image cloud Ubuntu 24.04 (sans interface graphique), configurée par cloud-init : IP fixe (pas de DHCP sur ce VLAN), passerelle 10.1.199.254, DNS 1.1.1.1. Aucune clé SSH ni mot de passe n'est injecté ; chacun pose le sien avec `qm guest passwd <id> ubuntu`. Le snippet autorise ensuite la connexion SSH par mot de passe (`ssh ubuntu@10.1.199.110`), que l'image cloud interdit par défaut, à condition que la passerelle laisse passer le port 22 vers le VLAN 199. Le snippet [`infra/proxmox/noeud-k8s.yaml`](infra/proxmox/noeud-k8s.yaml) (vendor-data cloud-init) installe l'agent invité QEMU, prépare les nœuds pour Longhorn (section 3) et écrit la configuration de k3s.
 
 On avait commencé avec 2 Go de RAM et 32 Go de disque. Après k3s, etcd et Traefik, il restait environ 1 Go libre par nœud, alors que la stack en demandait 2 à 2,5 Go de plus : on est passé à 4 Go. Les disques sont passés à 64 Go pour Longhorn, qui garde 3 copies de 23 Go de volumes demandés (le pool LVM est en thin provisioning, l'espace n'est consommé qu'à l'écriture).
 

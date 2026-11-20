@@ -16,6 +16,11 @@ write_files:
   - path: /etc/modules-load.d/longhorn.conf
     content: |
       iscsi_tcp
+  # SSH par mot de passe (compte ubuntu, mot de passe posé avec qm guest passwd) :
+  # ce fichier passe avant 60-cloudimg-settings.conf, qui l'interdit
+  - path: /etc/ssh/sshd_config.d/10-mot-de-passe.conf
+    content: |
+      PasswordAuthentication yes
   # multipathd (actif sur Ubuntu) s'empare sinon des disques iSCSI de Longhorn
   - path: /etc/multipath.conf
     append: true
